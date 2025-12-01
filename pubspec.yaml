@@ -1,0 +1,42 @@
+name: cs_laboratorio
+description: "App de escritorio."
+publish_to: "none" # Remove this line if you wish to publish to pub.dev
+version: 16.0.61+1
+
+environment:
+  sdk: ^3.7.2
+
+dependencies:
+  archive: ^4.0.7
+  ffi: ^2.1.4
+  flutter:
+    sdk: flutter
+  flutter_libserialport: ^0.5.0
+  fluttertoast: ^8.2.12
+  http: ^1.4.0
+  mqtt_client: ^10.8.0
+  path: ^1.9.1
+  path_provider: ^2.1.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^5.0.0
+  icons_launcher: ^3.0.1
+
+icons_launcher:
+  image_path: "assets/LogoApp.png"
+  platforms:
+    windows:
+      enable: true
+
+# The following section is specific to Flutter packages.
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/LogoApp.png
+    - assets/misc/Dragon.png
+    - assets/python-embed.zip
+    - assets/boot_app0.bin
