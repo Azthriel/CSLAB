@@ -40,7 +40,11 @@ macos/
 web/
 test/
 .vscode/
-
+lib/firebase_options.dart
+firebase.json
+.firebaserc
+firestore.indexes.json
+firestore.rules
 assets/python-embed.zip
 python-embed/
 

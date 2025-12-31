@@ -1,6 +1,7 @@
 import 'dart:convert';
+import 'package:cslab/secret.dart';
 import 'package:flutter/material.dart';
-import 'package:cs_laboratorio/master.dart';
+import 'package:cslab/master.dart';
 import 'package:http/http.dart' as http;
 
 class ThingMaker extends StatefulWidget {
@@ -36,9 +37,7 @@ class _ThingMakerState extends State<ThingMaker> {
   }
 
   Future<void> createThings() async {
-    Uri uri = Uri.parse(
-      'https://7afkb3q46b.execute-api.sa-east-1.amazonaws.com/v1/THINGS',
-    );
+    Uri uri = Uri.parse(createThingURL);
 
     // Obtiene la lista de puertos seleccionados para enviar cada Thing
     final ports = service.selectedPortNames;
@@ -52,8 +51,9 @@ class _ThingMakerState extends State<ThingMaker> {
       String portName = ports[i];
 
       // Conecta el puerto específico para este Thing
-      if (!service.connectPort(portName)) {
-        showToast('Error al conectar al puerto \$portName');
+      final connected = await service.connectPort(portName);
+      if (!connected) {
+        showToast('Error al conectar al puerto $portName');
         continue;
       }
 

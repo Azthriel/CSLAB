@@ -13,7 +13,7 @@ import 'package:path/path.dart' as p;
 //! VARIABLES !\\
 
 //!-------------------------VERSION NUMBER-------------------------!\\
-const String appVersionNumber = '1.0.10';
+const String appVersionNumber = '2.0.0';
 //!-------------------------VERSION NUMBER-------------------------!\\
 
 //*-Colores-*\\
@@ -32,6 +32,12 @@ late FToast fToast;
 //*-Key de la app (uso de navegación y contextos)-*\\
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 //*-Key de la app (uso de navegación y contextos)-*\\
+
+//*-Usuario conectado-*\\
+String legajoConectado = '';
+int accessLevel = 0;
+String completeName = '';
+//*-Usuario conectado-*\\
 
 //*-Estado de app-*\\
 const bool xProfileMode = bool.fromEnvironment('dart.vm.profile');
@@ -277,10 +283,11 @@ Widget buildButton({
   required String text,
   required VoidCallback? onPressed,
   IconData? icon,
+  Color? color,
 }) {
   return ElevatedButton.icon(
     style: ElevatedButton.styleFrom(
-      backgroundColor: color1,
+      backgroundColor: color ?? color1,
       padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       elevation: 6,
@@ -422,23 +429,149 @@ Future<void> ensurePythonEmbed() async {
 }
 
 //! Clases !\\
+
+/// Configuraciones globales de la aplicación
+class AppSettings extends ChangeNotifier {
+  static final AppSettings _instance = AppSettings._internal();
+  factory AppSettings() => _instance;
+  AppSettings._internal();
+
+  // Configuraciones de SerialService
+  int _maxLogMessages = 1000;
+  Duration _commandTimeout = const Duration(seconds: 5);
+  Duration _reconnectDelay = const Duration(milliseconds: 500);
+  int _maxRetries = 3;
+
+  // Configuraciones de AutoPage
+  int _maxConcurrentFlash = 4;
+  int _maxRetriesFlash = 2;
+  Duration _certLineDelay = const Duration(milliseconds: 300);
+  Duration _deviceDelay = const Duration(milliseconds: 500);
+
+  // Getters
+  int get maxLogMessages => _maxLogMessages;
+  Duration get commandTimeout => _commandTimeout;
+  Duration get reconnectDelay => _reconnectDelay;
+  int get maxRetries => _maxRetries;
+  int get maxConcurrentFlash => _maxConcurrentFlash;
+  int get maxRetriesFlash => _maxRetriesFlash;
+  Duration get certLineDelay => _certLineDelay;
+  Duration get deviceDelay => _deviceDelay;
+
+  // Setters con notificación
+  set maxLogMessages(int value) {
+    if (value >= 100 && value <= 10000) {
+      _maxLogMessages = value;
+      notifyListeners();
+    }
+  }
+
+  set commandTimeout(Duration value) {
+    _commandTimeout = value;
+    notifyListeners();
+  }
+
+  set reconnectDelay(Duration value) {
+    _reconnectDelay = value;
+    notifyListeners();
+  }
+
+  set maxRetries(int value) {
+    if (value >= 1 && value <= 10) {
+      _maxRetries = value;
+      notifyListeners();
+    }
+  }
+
+  set maxConcurrentFlash(int value) {
+    if (value >= 1 && value <= 40) {
+      _maxConcurrentFlash = value;
+      notifyListeners();
+    }
+  }
+
+  set maxRetriesFlash(int value) {
+    if (value >= 1 && value <= 10) {
+      _maxRetriesFlash = value;
+      notifyListeners();
+    }
+  }
+
+  set certLineDelay(Duration value) {
+    _certLineDelay = value;
+    notifyListeners();
+  }
+
+  set deviceDelay(Duration value) {
+    _deviceDelay = value;
+    notifyListeners();
+  }
+
+  // Resetear a valores por defecto
+  void resetToDefaults() {
+    _maxLogMessages = 1000;
+    _commandTimeout = const Duration(seconds: 5);
+    _reconnectDelay = const Duration(milliseconds: 500);
+    _maxRetries = 3;
+    _maxConcurrentFlash = 4;
+    _maxRetriesFlash = 2;
+    _certLineDelay = const Duration(milliseconds: 300);
+    _deviceDelay = const Duration(milliseconds: 500);
+    notifyListeners();
+  }
+}
+
 /// Servicio singleton para manejar un único puerto serie
 class SerialService extends ChangeNotifier {
   static final SerialService _instance = SerialService._internal();
   factory SerialService() => _instance;
   SerialService._internal();
 
+  // Usar configuraciones dinámicas
+  final settings = AppSettings();
+
   /// Puertos disponibles como objetos SerialPort (para acceder a .description)
   List<SerialPort> ports = [];
   List<String> selectedPortNames = [];
   int baudRate = 115200;
 
-  /// Historial completo de mensajes
+  /// Historial completo de mensajes (con límite automático)
   final List<SerialMessage> messageLog = [];
 
   final List<SerialPortReader> _readers = [];
   final StreamController<SerialMessage> _inController =
       StreamController.broadcast();
+
+  // Control de listening on-demand
+  bool isListening = false;
+  final Map<String, StreamSubscription> _streamSubscriptions = {};
+
+  // Debouncing para notifyListeners()
+  Timer? _notifyTimer;
+  bool _hasPendingNotification = false;
+
+  /// Notifica listeners con debouncing para evitar saturar UI
+  void _notifyWithDebounce() {
+    _hasPendingNotification = true;
+    _notifyTimer?.cancel();
+    _notifyTimer = Timer(const Duration(milliseconds: 100), () {
+      if (_hasPendingNotification) {
+        _hasPendingNotification = false;
+        notifyListeners();
+      }
+    });
+  }
+
+  /// Limpia logs si exceden el máximo
+  void _trimLogs() {
+    if (messageLog.length > settings.maxLogMessages) {
+      messageLog.removeRange(0, messageLog.length - settings.maxLogMessages);
+      // printLog(
+      //   'Logs trimmed to ${settings.maxLogMessages} messages',
+      //   'amarillo',
+      // );
+    }
+  }
 
   /// Stream público con todo lo que llega del puerto
   Stream<SerialMessage> get incomingData => _inController.stream;
@@ -454,26 +587,72 @@ class SerialService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Desconecta un solo puerto
-  void disconnectPort(String name) {
+  /// Desconecta un solo puerto con limpieza adecuada
+  Future<void> disconnectPort(String name) async {
+    // Primero cancelar el listener si existe
+    _stopListening(name);
+
     final idx = _readers.indexWhere((r) => r.port.name == name);
     if (idx != -1) {
-      _readers[idx].port.close();
-      _readers.removeAt(idx);
-      notifyListeners();
+      try {
+        final reader = _readers[idx];
+        if (reader.port.isOpen) {
+          try {
+            // Limpiar buffers antes de cerrar (3 = both)
+            reader.port.flush(3);
+          } catch (e) {
+            // Ignorar errores de flush
+          }
+          await Future.delayed(const Duration(milliseconds: 100));
+          try {
+            reader.port.close();
+            printLog('Port $name closed successfully', 'verde');
+          } catch (e) {
+            // Ignorar SerialPortError al cerrar (común en Windows)
+            if (!e.toString().contains('completó correctamente')) {
+              printLog('Error closing port $name: $e', 'rojo');
+            }
+          }
+        }
+        _readers.removeAt(idx);
+        notifyListeners();
+      } catch (e) {
+        printLog('Exception in disconnectPort $name: $e', 'rojo');
+      }
     }
   }
 
-  /// Desconecta todos los puertos
-  void disconnectAll() {
+  /// Desconecta todos los puertos con limpieza adecuada
+  Future<void> disconnectAll() async {
+    printLog('Disconnecting all ports...', 'amarillo');
     for (final r in _readers) {
-      r.port.close();
+      try {
+        if (r.port.isOpen) {
+          try {
+            r.port.flush(3); // 3 = both input/output
+          } catch (e) {
+            // Ignorar errores de flush
+          }
+          await Future.delayed(const Duration(milliseconds: 50));
+          try {
+            r.port.close();
+          } catch (e) {
+            // Silenciar SerialPortError común en Windows
+            if (!e.toString().contains('completó correctamente')) {
+              printLog('Error closing port ${r.port.name}: $e', 'rojo');
+            }
+          }
+        }
+      } catch (e) {
+        printLog('Exception closing port ${r.port.name}: $e', 'rojo');
+      }
     }
     _readers.clear();
+    printLog('All ports disconnected', 'verde');
     notifyListeners();
   }
 
-  /// Conecta a todos los puertos marcados
+  /// Conecta a todos los puertos marcados (sin iniciar listening automático)
   bool connectMultiple() {
     disconnectAll();
     bool anyOk = false;
@@ -486,19 +665,18 @@ class SerialService extends ChangeNotifier {
             ..bits = 8
             ..stopBits = 1
             ..parity = 0;
+
+      // Limpiar buffer
+      port.flush(3);
+
       final reader = SerialPortReader(port);
-      reader.stream.listen((chunk) {
-        try {
-          final text = utf8.decode(chunk);
-          final msg = SerialMessage(name, text);
-          _inController.add(msg);
-          messageLog.add(msg);
-          notifyListeners();
-        } catch (e) {
-          printLog('Error al decodificar el chunk: $e');
-        }
-      });
       _readers.add(reader);
+
+      // Si isListening está activo, iniciar el listener
+      if (isListening) {
+        _startListening(name, reader);
+      }
+
       anyOk = true;
     }
     notifyListeners();
@@ -522,51 +700,180 @@ class SerialService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Envia mensaje a un puerto específico
-  void sendToPort(String name, String message) {
+  /// Envia mensaje a un puerto específico con validación
+  Future<bool> sendToPort(String name, String message) async {
     try {
       final bytes = utf8.encode(message);
       for (final reader in _readers) {
-        if (reader.port.name == name && reader.port.isOpen) {
-          reader.port.write(Uint8List.fromList(bytes));
-          break;
+        if (reader.port.name == name) {
+          if (!reader.port.isOpen) {
+            printLog('Port $name is not open', 'rojo');
+            return false;
+          }
+
+          final written = reader.port.write(Uint8List.fromList(bytes));
+          if (written != bytes.length) {
+            printLog(
+              'Incomplete write to $name: $written/${bytes.length}',
+              'amarillo',
+            );
+          }
+
+          // Pequeño delay para permitir procesamiento
+          await Future.delayed(const Duration(milliseconds: 50));
+          printLog('Sent ${bytes.length} bytes to $name', 'verde');
+          return true;
         }
       }
+      printLog('Port $name not found in active readers', 'rojo');
+      return false;
     } catch (e) {
-      printLog('Error al enviar mensaje: $e');
+      printLog('Error al enviar mensaje a $name: $e', 'rojo');
       showToast('Error al enviar mensaje: $e');
+      return false;
     }
   }
 
-  /// Conecta un solo puerto cuyo nombre recibes
-  bool connectPort(String name) {
+  /// Conecta un solo puerto cuyo nombre recibes (con retry)
+  Future<bool> connectPort(String name, {int? retries}) async {
+    retries ??= settings.maxRetries;
     // Evita reconectar si ya está abierto
     if (_readers.any((r) => r.port.name == name && r.port.isOpen)) {
+      printLog('Port $name already connected', 'verde');
       return true;
     }
-    final port = SerialPort(name);
-    if (!port.openReadWrite()) {
-      return false;
+
+    for (int attempt = 1; attempt <= retries; attempt++) {
+      try {
+        printLog('Connecting to $name (attempt $attempt/$retries)', 'cyan');
+        final port = SerialPort(name);
+
+        if (!port.openReadWrite()) {
+          printLog('Failed to open port $name on attempt $attempt', 'rojo');
+          if (attempt < retries) {
+            await Future.delayed(settings.reconnectDelay * attempt);
+            continue;
+          }
+          return false;
+        }
+
+        port.config =
+            SerialPortConfig()
+              ..baudRate = baudRate
+              ..bits = 8
+              ..stopBits = 1
+              ..parity = 0;
+
+        // Limpiar buffer antes de leer (3 = both input/output)
+        port.flush(3);
+
+        final reader = SerialPortReader(port);
+        _readers.add(reader);
+
+        // Si isListening está activo, iniciar el listener inmediatamente
+        if (isListening) {
+          _startListening(name, reader);
+        }
+        printLog('Successfully connected to $name', 'verde');
+        _notifyWithDebounce(); // Debounced para evitar saturar UI
+        return true;
+      } catch (e) {
+        printLog('Exception connecting to $name: $e', 'rojo');
+        if (attempt < retries) {
+          await Future.delayed(settings.reconnectDelay * attempt);
+        }
+      }
     }
-    port.config =
-        SerialPortConfig()
-          ..baudRate = baudRate
-          ..bits = 8
-          ..stopBits = 1
-          ..parity = 0;
 
-    final reader = SerialPortReader(port)
-      ..stream.listen((chunk) {
-        final text = utf8.decode(chunk);
-        final msg = SerialMessage(name, text);
-        _inController.add(msg);
-        messageLog.add(msg);
-        notifyListeners();
-      });
+    printLog('Failed to connect to $name after $retries attempts', 'rojo');
+    return false;
+  }
 
-    _readers.add(reader);
-    notifyListeners();
-    return true;
+  /// Inicia el listening de datos para un puerto específico
+  void _startListening(String portName, SerialPortReader reader) {
+    // Si ya existe una suscripción, solo reanudarla
+    if (_streamSubscriptions.containsKey(portName)) {
+      _streamSubscriptions[portName]!.resume();
+      printLog('Resumed listening on $portName', 'cyan');
+      return;
+    }
+
+    final sub = reader.stream.listen(
+      (chunk) {
+        try {
+          final text = utf8.decode(chunk, allowMalformed: true);
+          if (text.trim().isNotEmpty) {
+            final msg = SerialMessage(portName, text);
+            _inController.add(msg);
+            messageLog.add(msg);
+            _trimLogs();
+            _notifyWithDebounce();
+          }
+        } catch (e) {
+          // Silenciar errores de decodificación
+        }
+      },
+      onError: (error) {
+        if (!error.toString().contains('completó correctamente')) {
+          printLog('Stream error on $portName: $error', 'rojo');
+        }
+      },
+      cancelOnError: false,
+    );
+
+    _streamSubscriptions[portName] = sub;
+    printLog('Started listening on $portName', 'cyan');
+  }
+
+  /// Cancela completamente la suscripción de un puerto (para desconexión)
+  void _stopListening(String portName) {
+    final sub = _streamSubscriptions.remove(portName);
+    sub?.cancel();
+    printLog('Stopped listening on $portName', 'cyan');
+  }
+
+  /// Pausa el listening de un puerto específico (no cancela la suscripción)
+  void _pauseListening(String portName) {
+    final sub = _streamSubscriptions[portName];
+    if (sub != null && !sub.isPaused) {
+      sub.pause();
+      printLog('Paused listening on $portName', 'cyan');
+    }
+  }
+
+  /// Activa el listening en todos los puertos conectados
+  void startListeningAll() {
+    isListening = true;
+    for (var reader in _readers) {
+      if (reader.port.isOpen) {
+        final portName = reader.port.name;
+        if (portName != null) {
+          _startListening(portName, reader);
+        }
+      }
+    }
+    printLog('Started listening on all ${_readers.length} ports', 'verde');
+    _notifyWithDebounce(); // Usar debounce para evitar setState durante build
+  }
+
+  /// Pausa el listening en todos los puertos (pero mantiene suscripciones)
+  void stopListeningAll() {
+    isListening = false;
+    for (var portName in _streamSubscriptions.keys) {
+      _pauseListening(portName);
+    }
+    printLog('Paused listening on all ports', 'amarillo');
+    _notifyWithDebounce(); // Usar debounce para evitar setState durante build
+  }
+
+  /// Limpieza completa del servicio
+  Future<void> disposeService() async {
+    _notifyTimer?.cancel();
+    stopListeningAll(); // Cancelar todos los listeners
+    await disconnectAll();
+    await _inController.close();
+    messageLog.clear();
+    printLog('SerialService disposed', 'verde');
   }
 }
 

@@ -2,9 +2,9 @@
 
 import 'dart:convert';
 import 'dart:io';
-
+import 'package:cslab/secret.dart';
 import 'package:flutter/material.dart';
-import 'package:cs_laboratorio/master.dart';
+import 'package:cslab/master.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
@@ -19,6 +19,7 @@ class ToolsPage extends StatefulWidget {
 
 class ToolsPageState extends State<ToolsPage> {
   final service = SerialService();
+  final settings = AppSettings(); // Usar configuraciones dinámicas
   final TextEditingController _productCodeController = TextEditingController();
   final TextEditingController _hwVersionController = TextEditingController();
   final TextEditingController _startNumberController = TextEditingController();
@@ -56,10 +57,16 @@ class ToolsPageState extends State<ToolsPage> {
     super.dispose();
   }
 
-  void programSerials() {
+  Future<void> programSerials() async {
     printLog('Starting programSerials', 'amarillo');
     int startNum = int.tryParse(_startNumberController.text) ?? 0;
     printLog('Parsed startNum: $startNum');
+
+    if (service.selectedPortNames.isEmpty) {
+      showToast('No hay puertos seleccionados');
+      return;
+    }
+
     final now = DateTime.now();
     final yy = now.year.toString().substring(2).padLeft(2, '0');
     final mm = now.month.toString().padLeft(2, '0');
@@ -68,20 +75,36 @@ class ToolsPageState extends State<ToolsPage> {
     printLog('Date part for SN: $datePart');
 
     setState(() => _isChangingSN = true);
+
+    int successCount = 0;
+    int failCount = 0;
     int counter = startNum;
+
     for (final portName in service.selectedPortNames) {
       final nn = counter.toString().padLeft(2, '0');
       final serialNum = '$datePart$nn';
       String msg = jsonEncode({"cmd": 4, "content": serialNum});
+
       printLog('Sending SN to $portName: $serialNum');
-      showToast('Cargando SN $serialNum a $portName');
-      service.sendToPort(portName, msg);
+      final sent = await service.sendToPort(portName, msg);
+
+      if (sent) {
+        showToast('SN $serialNum cargado a $portName');
+        successCount++;
+      } else {
+        showToast('Error cargando SN a $portName');
+        failCount++;
+      }
+
       counter++;
+
+      // Delay entre comandos
+      await Future.delayed(const Duration(milliseconds: 300));
     }
 
     setState(() => _isChangingSN = false);
-    // showToast('Cargamos SN a ${service.selectedPortNames.length} puertos');
-    printLog('Finished programSerials');
+    showToast('SNs cargados: $successCount OK, $failCount errores');
+    printLog('Finished programSerials: $successCount OK, $failCount failed');
   }
 
   /// Lista el directorio LAB_FILES en GitHub y devuelve el directorio con la última versión de software (termina con "_F")
@@ -95,58 +118,117 @@ class ToolsPageState extends State<ToolsPage> {
       '/repos/$_owner/$_repo/contents/$path',
       {'ref': _branch},
     );
+
     printLog('Fetching LAB_FILES from: $uri', 'azul');
-    final response = await http.get(
-      uri,
-      headers: {'Accept': 'application/vnd.github.v3+json'},
-    );
-    printLog('GitHub API status: ${response.statusCode}');
-    if (response.statusCode != 200) {
-      printLog('Error listing LAB_FILES: ${response.body}', 'rojo');
-      throw Exception('Error al listar LAB_FILES: ${response.statusCode}');
-    }
-    final List<dynamic> items = jsonDecode(response.body);
-    final prefix = 'hv${hwVersion}sv';
-    final folders = <String>[];
-    for (final item in items) {
-      if (item['type'] == 'dir') {
-        final name = item['name'] as String;
-        printLog('Found item: $name', 'verde');
-        final expectedLength = prefix.length + 9;
-        if (name.startsWith(prefix) &&
-            name.endsWith('_F') &&
-            name.length == expectedLength) {
-          folders.add(name);
-          printLog('Accepted folder: $name', 'verde');
+
+    // Retry con timeout
+    for (int retry = 0; retry < settings.maxRetriesFlash; retry++) {
+      try {
+        final response = await http
+            .get(
+              uri,
+              headers: {
+                'Authorization': 'Bearer $githubToken',
+                'Accept': 'application/vnd.github.v3+json',
+              },
+            )
+            .timeout(Duration(seconds: 10));
+
+        printLog('GitHub API status: ${response.statusCode}');
+
+        if (response.statusCode == 200) {
+          final List<dynamic> items = jsonDecode(response.body);
+          final prefix = 'hv${hwVersion}sv';
+          final folders = <String>[];
+
+          for (final item in items) {
+            if (item['type'] == 'dir') {
+              final name = item['name'] as String;
+              printLog('Found item: $name', 'verde');
+              final expectedLength = prefix.length + 9;
+              if (name.startsWith(prefix) &&
+                  name.endsWith('_F') &&
+                  name.length == expectedLength) {
+                folders.add(name);
+                printLog('Accepted folder: $name', 'verde');
+              }
+            }
+          }
+
+          if (folders.isEmpty) {
+            printLog('No matching folders found for HW $hwVersion', 'rojo');
+            throw Exception(
+              'No se encontró ninguna versión de software para HW $hwVersion',
+            );
+          }
+
+          folders.sort();
+          final latestFolder = folders.last;
+          printLog('Latest software folder: $latestFolder', 'magenta');
+          return latestFolder;
+        } else if (retry < settings.maxRetriesFlash - 1) {
+          printLog(
+            'Retry ${retry + 1}/$settings.maxRetriesFlash for GitHub API',
+            'amarillo',
+          );
+          await Future.delayed(Duration(seconds: retry + 1));
+        }
+      } catch (e) {
+        printLog(
+          'Exception fetching LAB_FILES (attempt ${retry + 1}): $e',
+          'rojo',
+        );
+        if (retry < settings.maxRetriesFlash - 1) {
+          await Future.delayed(Duration(seconds: retry + 1));
+        } else {
+          rethrow;
         }
       }
     }
-    if (folders.isEmpty) {
-      printLog('No matching folders found for HW $hwVersion', 'rojo');
-      throw Exception(
-        'No se encontró ninguna versión de software para HW $hwVersion',
-      );
-    }
-    folders.sort();
-    final latestFolder = folders.last;
-    printLog('Latest software folder: $latestFolder', 'magenta');
-    return latestFolder;
+
+    throw Exception(
+      'Failed to fetch LAB_FILES after $settings.maxRetriesFlash attempts',
+    );
   }
 
-  /// Descarga un archivo desde GitHub raw y lo guarda localmente
+  /// Descarga un archivo desde GitHub raw y lo guarda localmente (con retry)
   Future<File> downloadFile(Uri url, String outPath) async {
     printLog('Downloading file: $url to $outPath', 'cyan');
-    final response = await http.get(url);
-    printLog('Download status for $url: ${response.statusCode}');
-    if (response.statusCode == 200) {
-      final file = File(outPath);
-      await file.writeAsBytes(response.bodyBytes);
-      printLog('Saved file to $outPath');
-      return file;
-    } else {
-      printLog('Failed download: ${response.statusCode}', 'rojo');
-      throw Exception('Error al descargar $outPath: ${response.statusCode}');
+
+    for (int retry = 0; retry < settings.maxRetriesFlash; retry++) {
+      try {
+        final response = await http.get(url).timeout(Duration(seconds: 10));
+        printLog('Download status for $url: ${response.statusCode}');
+
+        if (response.statusCode == 200) {
+          final file = File(outPath);
+          await file.writeAsBytes(response.bodyBytes);
+          printLog(
+            'Saved file to $outPath (${response.bodyBytes.length} bytes)',
+          );
+          return file;
+        } else if (retry < settings.maxRetriesFlash - 1) {
+          printLog(
+            'Retry ${retry + 1}/$settings.maxRetriesFlash for download',
+            'amarillo',
+          );
+          await Future.delayed(Duration(seconds: retry + 1));
+        }
+      } catch (e) {
+        printLog('Exception downloading (attempt ${retry + 1}): $e', 'rojo');
+        if (retry < settings.maxRetriesFlash - 1) {
+          await Future.delayed(Duration(seconds: retry + 1));
+        } else {
+          throw Exception(
+            'Error al descargar $outPath después de $settings.maxRetriesFlash intentos: $e',
+          );
+        }
+      }
     }
+
+    throw Exception(
+      'Failed to download $outPath after $settings.maxRetriesFlash attempts',
+    );
   }
 
   /// Programa el ESP32-C3 flasheando los binarios descargados de la carpeta más reciente
@@ -212,14 +294,20 @@ class ToolsPageState extends State<ToolsPage> {
       for (final port in service.selectedPortNames) {
         printLog('Closing serial port: $port', 'amarillo');
         try {
-          service.disconnectPort(port);
+          await service.disconnectPort(port);
           printLog('Port closed: $port', 'verde');
         } catch (e) {
           printLog('Error closing port $port: $e', 'rojo');
         }
       }
 
-      // 4) Flashear con esptool
+      // Dar tiempo al OS
+      await Future.delayed(const Duration(seconds: 2));
+
+      // 4) Flashear con esptool (con retry)
+      int successCount = 0;
+      int failCount = 0;
+
       for (final rawPort in service.selectedPortNames) {
         // Si el nombre es COM con número >=10, usa el prefijo \\.\COMxx
         final port =
@@ -228,46 +316,80 @@ class ToolsPageState extends State<ToolsPage> {
                 : rawPort;
 
         printLog('Flashing port: $port at baud 576000');
-        final args = [
-          '-m',
-          'esptool',
-          '--chip',
-          'esp32c3',
-          '--port',
-          port,
-          '--baud',
-          '576000',
-          '--before',
-          'default_reset',
-          '--after',
-          'hard_reset',
-          'write_flash',
-          '-z',
-          '0x0000',
-          localPaths[0],
-          '0x8000',
-          localPaths[1],
-          '0xE000',
-          localPaths[2],
-          '0x10000',
-          localPaths[3],
-        ];
-        printLog('esptool args: $args');
 
-        printLog('Running esptool...');
-        final result = await Process.run(pythonExe, args);
-        printLog('esptool result.exitCode=${result.exitCode}');
-        if (result.stdout.isNotEmpty) printLog('stdout: ${result.stdout}');
-        if (result.stderr.isNotEmpty) {
-          printLog('stderr: ${result.stderr}', 'rojo');
-        }
+        bool flashSuccess = false;
+        for (
+          int retry = 0;
+          retry < settings.maxRetriesFlash && !flashSuccess;
+          retry++
+        ) {
+          final args = [
+            '-m',
+            'esptool',
+            '--chip',
+            'esp32c3',
+            '--port',
+            port,
+            '--baud',
+            '576000',
+            '--before',
+            'default_reset',
+            '--after',
+            'hard_reset',
+            'write_flash',
+            '-z',
+            '0x0000',
+            localPaths[0],
+            '0x8000',
+            localPaths[1],
+            '0xE000',
+            localPaths[2],
+            '0x10000',
+            localPaths[3],
+          ];
 
-        if (result.exitCode != 0) {
-          showToast('Error flasheando $rawPort: ${result.stderr}');
-        } else {
-          showToast('Flasheo exitoso en $rawPort');
+          printLog(
+            'Running esptool... (attempt ${retry + 1}/$settings.maxRetriesFlash)',
+          );
+
+          try {
+            final result = await Process.run(
+              pythonExe,
+              args,
+            ).timeout(Duration(seconds: 60));
+
+            printLog('esptool result.exitCode=${result.exitCode}');
+            if (result.stdout.isNotEmpty) printLog('stdout: ${result.stdout}');
+            if (result.stderr.isNotEmpty) {
+              printLog('stderr: ${result.stderr}', 'rojo');
+            }
+
+            if (result.exitCode == 0) {
+              showToast('Flasheo exitoso en $rawPort');
+              flashSuccess = true;
+              successCount++;
+            } else if (retry < settings.maxRetriesFlash - 1) {
+              printLog('Flash failed, retrying...', 'amarillo');
+              await Future.delayed(Duration(seconds: retry + 2));
+            } else {
+              showToast(
+                'Error flasheando $rawPort después de $settings.maxRetriesFlash intentos',
+              );
+              failCount++;
+            }
+          } catch (e) {
+            printLog('Exception flashing $rawPort: $e', 'rojo');
+            if (retry < settings.maxRetriesFlash - 1) {
+              await Future.delayed(Duration(seconds: retry + 2));
+            } else {
+              showToast('Error crítico flasheando $rawPort: $e');
+              failCount++;
+            }
+          }
         }
       }
+
+      showToast('Flasheo completo: $successCount OK, $failCount errores');
     } catch (e, st) {
       printLog('Exception in programFirmware: $e\n$st', 'rojo');
       showToast('Error: $e');

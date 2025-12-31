@@ -1,4 +1,4 @@
-import 'package:cs_laboratorio/master.dart';
+import 'package:cslab/master.dart';
 import 'package:flutter/material.dart';
 
 class SerialLogPage extends StatefulWidget {
@@ -17,19 +17,21 @@ class _SerialLogPageState extends State<SerialLogPage> {
     super.initState();
     // Nos suscribimos para recibir notificaciones de nuevos mensajes
     service.addListener(_onServiceChanged);
-    // Si aún no conectas desde otro sitio, podrías lanzar la conexión aquí
-    // service.connectMultiple();
+    // El usuario debe presionar play manualmente para iniciar listening
   }
 
   void _onServiceChanged() {
-    // Disparamos rebuild
-    setState(() {});
-    // Tras el rebuild, desplazamos al último mensaje
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-      }
-    });
+    // Solo actualizar si est\u00e1 escuchando
+    if (service.isListening) {
+      // Disparamos rebuild
+      setState(() {});
+      // Tras el rebuild, desplazamos al \u00faltimo mensaje
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        }
+      });
+    }
   }
 
   @override
@@ -48,11 +50,30 @@ class _SerialLogPageState extends State<SerialLogPage> {
         backgroundColor: color2,
         foregroundColor: color4,
         actions: [
+          // Bot\u00f3n de play/pause para controlar listening
+          IconButton(
+            icon: Icon(
+              service.isListening ? Icons.pause : Icons.play_arrow,
+              color: color4,
+            ),
+            tooltip: service.isListening ? 'Pausar escucha' : 'Iniciar escucha',
+            onPressed: () {
+              if (service.isListening) {
+                service.stopListeningAll();
+                showToast('Escucha pausada (sin carga de CPU)');
+              } else {
+                service.startListeningAll();
+                showToast('Escuchando puertos serie');
+              }
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.delete, color: color4),
             tooltip: 'Borrar logs',
             onPressed: () {
               service.clearLogs();
+              // Forzar rebuild incluso si est\u00e1 pausado
+              setState(() {});
             },
           ),
         ],

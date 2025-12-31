@@ -1,7 +1,7 @@
 // lib/serial_page.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:cs_laboratorio/master.dart';
+import 'package:cslab/master.dart';
 
 class SerialPage extends StatefulWidget {
   const SerialPage({super.key});
@@ -15,6 +15,8 @@ class SerialPageState extends State<SerialPage> {
 
   StreamSubscription<SerialMessage>? _inSub;
   String _receivedText = '';
+  Timer? _updateTimer;
+  bool _hasPendingUpdate = false;
 
   @override
   void initState() {
@@ -22,15 +24,29 @@ class SerialPageState extends State<SerialPage> {
     service.addListener(_onServiceChanged);
     // Escucha todo lo que llegue por el serial
     _inSub = service.incomingData.listen((msg) {
-      setState(() {
-        // prefix + color por puerto, o simplemente texto
-        _receivedText += '[${msg.portName}] ${msg.data} \n';
-      });
+      // Agregar al buffer sin setState inmediato
+      _receivedText += '[${msg.portName}] ${msg.data} \n';
+      _scheduleBatchUpdate();
+    });
+  }
+
+  /// Agrupa actualizaciones de UI cada 100ms
+  void _scheduleBatchUpdate() {
+    if (_hasPendingUpdate) return;
+    _hasPendingUpdate = true;
+    _updateTimer?.cancel();
+    _updateTimer = Timer(const Duration(milliseconds: 100), () {
+      if (mounted && _hasPendingUpdate) {
+        setState(() {
+          _hasPendingUpdate = false;
+        });
+      }
     });
   }
 
   @override
   void dispose() {
+    _updateTimer?.cancel();
     _inSub?.cancel();
     _textController.dispose();
     service.removeListener(_onServiceChanged);

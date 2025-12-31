@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.20)
 project(runner LANGUAGES CXX)
 
 add_executable(${BINARY_NAME} WIN32
@@ -23,6 +23,7 @@ target_compile_definitions(${BINARY_NAME} PRIVATE
 )
 
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app "dwmapi.lib")
+target_link_options(${BINARY_NAME} PRIVATE /NODEFAULTLIB:libcmt.lib)
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # —— Aquí reemplaza tu bloque de copy por este ——

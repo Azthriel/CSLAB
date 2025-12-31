@@ -1,15 +1,19 @@
-import 'package:cs_laboratorio/menu.dart';
+import 'package:cslab/login.dart';
+import 'package:cslab/menu.dart';
 import 'package:flutter/material.dart';
-import 'package:cs_laboratorio/master.dart';
+import 'package:cslab/master.dart';
 import 'package:fluttertoast/fluttertoast.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   printLog('Inicio de la aplicación');
   printLog('Versión: $appVersionNumber');
   await ensurePythonEmbed();
-
   printLog('Python embebido inicializado');
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  printLog('Firebase inicializado');
 
   runApp(const MyApp());
 }
@@ -61,7 +65,11 @@ class MyAppState extends State<MyApp> {
           ),
         ),
       ),
-      home: const MenuPage(),
+      initialRoute: '/login',
+      routes: {
+        '/login': (context) => const LoginPage(),
+        '/menu': (context) => const MenuPage(),
+      },
       debugShowCheckedModeBanner: false,
     );
   }

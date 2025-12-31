@@ -1,11 +1,14 @@
 import 'dart:convert';
+import 'dart:io';
 
-import 'package:cs_laboratorio/auto.dart';
-import 'package:cs_laboratorio/master.dart';
-import 'package:cs_laboratorio/serial.dart';
-import 'package:cs_laboratorio/serial_log.dart';
-import 'package:cs_laboratorio/tools.dart';
+import 'package:cslab/auto.dart';
+import 'package:cslab/master.dart';
+import 'package:cslab/serial.dart';
+import 'package:cslab/serial_log.dart';
+import 'package:cslab/settings_page.dart';
+import 'package:cslab/tools.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 import 'thingmaker.dart';
 
 class MenuPage extends StatefulWidget {
@@ -17,6 +20,8 @@ class MenuPage extends StatefulWidget {
 
 class MenuPageState extends State<MenuPage> {
   final service = SerialService();
+  final settings = AppSettings();
+
   @override
   void initState() {
     super.initState();
@@ -24,6 +29,160 @@ class MenuPageState extends State<MenuPage> {
 
     if (mounted) {
       fToast.init(navigatorKey.currentState!.context);
+    }
+  }
+
+  Future<void> _eraseFlash() async {
+    if (service.selectedPortNames.isEmpty) {
+      showToast('No hay puertos seleccionados');
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            backgroundColor: color2,
+            title: const Text(
+              '⚠️ Confirmar Erase Flash',
+              style: TextStyle(color: color4),
+            ),
+            content: Text(
+              '¿Borrar TODA la memoria de ${service.selectedPortNames.length} dispositivo(s)?\n\nEsto eliminará firmware, certificados y configuraciones.',
+              style: const TextStyle(color: color4),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancelar', style: TextStyle(color: color4)),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text(
+                  'Borrar',
+                  style: TextStyle(color: Colors.red),
+                ),
+              ),
+            ],
+          ),
+    );
+
+    if (confirm != true) return;
+
+    // Verificar mounted antes de usar context
+    if (!mounted) return;
+
+    // Mostrar diálogo de progreso NO DISMISSIBLE
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder:
+          (context) => PopScope(
+            canPop: false,
+            child: AlertDialog(
+              backgroundColor: color2,
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const CircularProgressIndicator(color: color1),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Borrando flash de ${service.selectedPortNames.length} dispositivos...\n\nEsto puede tardar hasta 1 minuto.',
+                    style: const TextStyle(color: color4),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          ),
+    );
+
+    try {
+      final pythonExe = p.join(
+        File(Platform.resolvedExecutable).parent.path,
+        'python-embed',
+        'python.exe',
+      );
+
+      if (!File(pythonExe).existsSync()) {
+        if (mounted) Navigator.pop(context); // Cerrar diálogo de progreso
+        showToast('Python no encontrado');
+        return;
+      }
+
+      await service.disconnectAll();
+      await Future.delayed(const Duration(milliseconds: 2000));
+
+      int successCount = 0;
+      int failCount = 0;
+      final List<String> errorDetails = [];
+
+      for (final port in service.selectedPortNames) {
+        final portArg =
+            (port.startsWith('COM') && port.length > 4) ? r'\\.\' + port : port;
+
+        printLog('Erasing flash on $port...', 'amarillo');
+
+        final args = [
+          '-m',
+          'esptool',
+          '--chip',
+          'esp32c3',
+          '--port',
+          portArg,
+          '--baud',
+          '${service.baudRate}',
+          '--connect-attempts',
+          '5',
+          'erase_flash',
+        ];
+
+        try {
+          final result = await Process.run(
+            pythonExe,
+            args,
+          ).timeout(const Duration(seconds: 60));
+
+          printLog('Erase exitCode=${result.exitCode} for $port', 'cyan');
+
+          if (result.exitCode == 0) {
+            printLog('Erase successful on $port', 'verde');
+            successCount++;
+          } else {
+            final stderr = result.stderr?.toString().trim() ?? '';
+            final stdout = result.stdout?.toString().trim() ?? '';
+            final errorMsg = stderr.isNotEmpty ? stderr : stdout;
+            printLog('Erase FAILED on $port: $errorMsg', 'rojo');
+            errorDetails.add('$port: $errorMsg');
+            failCount++;
+          }
+        } catch (e) {
+          printLog('Exception erasing $port: $e', 'rojo');
+          errorDetails.add('$port: Exception - $e');
+          failCount++;
+        }
+
+        // Pequeño delay para no saturar
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+
+      // Cerrar diálogo de progreso
+      if (mounted) Navigator.pop(context);
+
+      // Mostrar resumen detallado
+      if (errorDetails.isNotEmpty) {
+        printLog('=== ERRORES DE ERASE ===', 'rojo');
+        for (final error in errorDetails) {
+          printLog(error, 'rojo');
+        }
+        printLog('========================', 'rojo');
+      }
+
+      showToast('Erase: $successCount OK, $failCount errores');
+    } catch (e) {
+      if (mounted) Navigator.pop(context); // Cerrar diálogo de progreso
+      printLog('Error crítico en _eraseFlash: $e', 'rojo');
+      showToast('Error: $e');
     }
   }
 
@@ -39,8 +198,206 @@ class MenuPageState extends State<MenuPage> {
           foregroundColor: color4,
           title: Text('CS Laboratorio $appVersionNumber'),
           actions: [
+            // Botón de información del usuario
+            IconButton(
+              icon: const Icon(Icons.account_circle, color: color4),
+              tooltip: 'Información del usuario',
+              onPressed: () {
+                showDialog(
+                  context: context,
+                  builder: (context) {
+                    return AlertDialog(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      backgroundColor: color1,
+                      titlePadding: const EdgeInsets.all(16),
+                      contentPadding: const EdgeInsets.all(16),
+                      title: const Text(
+                        "Información del Usuario",
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w600,
+                          color: color4,
+                        ),
+                      ),
+                      content: SingleChildScrollView(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Contenedor para Legajo
+                            Container(
+                              margin: const EdgeInsets.symmetric(vertical: 8.0),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: color2,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Text(
+                                    "Legajo:",
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w500,
+                                      color: color4,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      legajoConectado,
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        color: color4,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                      maxLines: 1,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            // Contenedor para Nombre
+                            Container(
+                              margin: const EdgeInsets.symmetric(vertical: 8.0),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: color2,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Text(
+                                    "Nombre:",
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w500,
+                                      color: color4,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      completeName,
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        color: color4,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                      maxLines: 1,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            // Contenedor para Nivel de acceso
+                            Container(
+                              margin: const EdgeInsets.symmetric(vertical: 8.0),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: color2,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Text(
+                                    "Nivel de acceso:",
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w500,
+                                      color: color4,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      accessLevel.toString(),
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        color: color4,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                      maxLines: 1,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      actions: [
+                        // Botón de cerrar sesión
+                        Center(
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.red,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              elevation: 5,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 20, vertical: 12),
+                            ),
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                              // Limpiar variables de sesión
+                              legajoConectado = '';
+                              accessLevel = 0;
+                              completeName = '';
+                              // Navegar a login
+                              Navigator.of(context)
+                                  .pushReplacementNamed('/login');
+                            },
+                            icon: const Icon(Icons.logout,
+                                size: 20, color: color4),
+                            label: const Text(
+                              "Cerrar sesión",
+                              style: TextStyle(color: color4, fontSize: 16),
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+            // Indicador de estado de listening
+            IconButton(
+              icon: Icon(
+                service.isListening ? Icons.fiber_manual_record : Icons.pause,
+                color: service.isListening ? Colors.red : color4,
+                size: 20,
+              ),
+              tooltip:
+                  service.isListening
+                      ? 'Escuchando puertos (Click para pausar)'
+                      : 'Escucha pausada (Click para iniciar)',
+              onPressed: () {
+                if (service.isListening) {
+                  service.stopListeningAll();
+                } else {
+                  service.startListeningAll();
+                }
+                setState(() {}); // Actualizar UI
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.settings, color: color4),
+              tooltip: 'Configuraciones',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const SettingsPage()),
+                );
+              },
+            ),
             IconButton(
               icon: const Icon(Icons.list_alt, color: color4),
+              tooltip: 'Ver logs',
               onPressed: () {
                 showModalBottomSheet(
                   context: context,
@@ -69,90 +426,95 @@ class MenuPageState extends State<MenuPage> {
                         child: LayoutBuilder(
                           builder: (context, constraints) {
                             final menuWidth = constraints.maxWidth;
-                            return InkWell(
-                              onTap: () async {
-                                final button =
-                                    context.findRenderObject() as RenderBox;
-                                final overlay =
-                                    Overlay.of(
-                                          context,
-                                        ).context.findRenderObject()
-                                        as RenderBox;
-                                final rect = RelativeRect.fromRect(
-                                  Rect.fromPoints(
-                                    button.localToGlobal(
-                                      Offset.zero,
-                                      ancestor: overlay,
+                            return PopupMenuButton<String>(
+                              enabled: !service.isConnected,
+                              color: color2,
+                              offset: const Offset(0, 50),
+                              constraints: BoxConstraints(
+                                minWidth: menuWidth,
+                                maxWidth: menuWidth,
+                              ),
+                              itemBuilder: (BuildContext context) {
+                                if (service.ports.isEmpty) {
+                                  return [
+                                    const PopupMenuItem<String>(
+                                      enabled: false,
+                                      child: Text(
+                                        'No hay puertos disponibles',
+                                        style: TextStyle(color: color4),
+                                      ),
                                     ),
-                                    button.localToGlobal(
-                                      button.size.bottomRight(Offset.zero),
-                                      ancestor: overlay,
-                                    ),
-                                  ),
-                                  Offset.zero & overlay.size,
-                                );
+                                  ];
+                                }
 
-                                final seleccionado = await showMenu<String>(
-                                  context: context,
-                                  position: rect,
-                                  constraints: BoxConstraints.tightFor(
-                                    width: menuWidth,
-                                  ),
-                                  color: color2,
-                                  items:
-                                      service.ports.map((port) {
-                                        final isSel = service.selectedPortNames
+                                return service.ports.map((port) {
+                                  return PopupMenuItem<String>(
+                                    enabled: false,
+                                    padding: EdgeInsets.zero,
+                                    child: StatefulBuilder(
+                                      builder: (context, innerSetState) {
+                                        final isSelected = service
+                                            .selectedPortNames
                                             .contains(port.name);
-                                        return PopupMenuItem<String>(
-                                          value: port.name,
-                                          child: Row(
-                                            children: [
-                                              Icon(
-                                                Icons.check,
-                                                color:
-                                                    isSel
-                                                        ? color5
-                                                        : Colors.transparent,
-                                              ),
-                                              const SizedBox(width: 8),
-                                              Expanded(
-                                                child: Text(
-                                                  port.description ??
-                                                      port.name ??
-                                                      '',
-                                                  style: const TextStyle(
-                                                    color: color4,
+                                        return InkWell(
+                                          onTap: () {
+                                            if (port.name != null) {
+                                              if (isSelected) {
+                                                service.selectedPortNames
+                                                    .remove(port.name!);
+                                              } else {
+                                                service.selectedPortNames.add(
+                                                  port.name!,
+                                                );
+                                              }
+                                              innerSetState(() {});
+                                              setState(() {});
+                                            }
+                                          },
+                                          child: Container(
+                                            width: menuWidth,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                              vertical: 12,
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                Icon(
+                                                  isSelected
+                                                      ? Icons.check_box
+                                                      : Icons
+                                                          .check_box_outline_blank,
+                                                  color:
+                                                      isSelected
+                                                          ? color0
+                                                          : color1.withValues(
+                                                            alpha: 0.6,
+                                                          ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Expanded(
+                                                  child: Text(
+                                                    port.description ??
+                                                        port.name ??
+                                                        '',
+                                                    style: TextStyle(
+                                                      color: color4,
+                                                      fontWeight:
+                                                          isSelected
+                                                              ? FontWeight.w600
+                                                              : FontWeight
+                                                                  .normal,
+                                                    ),
                                                   ),
                                                 ),
-                                              ),
-                                            ],
+                                              ],
+                                            ),
                                           ),
                                         );
-                                      }).toList(),
-                                );
-
-                                if (seleccionado != null) {
-                                  setState(() {
-                                    if (service.selectedPortNames.contains(
-                                      seleccionado,
-                                    )) {
-                                      // Estaba marcado: lo desmarcamos y desconectamos solo ese
-                                      service.selectedPortNames.remove(
-                                        seleccionado,
-                                      );
-                                      service.disconnectPort(seleccionado);
-                                    } else {
-                                      // Lo marcamos
-                                      service.selectedPortNames.add(
-                                        seleccionado,
-                                      );
-                                      // Si ya había conexión activa, conectamos inmediatamente este puerto
-                                      if (service.isConnected) {
-                                        service.connectPort(seleccionado);
-                                      }
-                                    }
-                                  });
-                                }
+                                      },
+                                    ),
+                                  );
+                                }).toList();
                               },
                               child: Container(
                                 padding: const EdgeInsets.symmetric(
@@ -160,8 +522,15 @@ class MenuPageState extends State<MenuPage> {
                                   horizontal: 8,
                                 ),
                                 decoration: BoxDecoration(
-                                  border: Border.all(color: color4),
+                                  border: Border.all(
+                                    color:
+                                        service.isConnected ? color3 : color4,
+                                  ),
                                   borderRadius: BorderRadius.circular(4),
+                                  color:
+                                      service.isConnected
+                                          ? color1.withValues(alpha: 0.3)
+                                          : Colors.transparent,
                                 ),
                                 child: Row(
                                   children: [
@@ -172,12 +541,18 @@ class MenuPageState extends State<MenuPage> {
                                             : service.selectedPortNames.join(
                                               ', ',
                                             ),
-                                        style: const TextStyle(color: color4),
+                                        style: TextStyle(
+                                          color:
+                                              service.isConnected
+                                                  ? color3
+                                                  : color4,
+                                        ),
                                       ),
                                     ),
-                                    const Icon(
+                                    Icon(
                                       Icons.arrow_drop_down,
-                                      color: color4,
+                                      color:
+                                          service.isConnected ? color3 : color4,
                                     ),
                                   ],
                                 ),
@@ -202,11 +577,23 @@ class MenuPageState extends State<MenuPage> {
                         onPressed:
                             service.selectedPortNames.isEmpty
                                 ? null
-                                : () {
+                                : () async {
                                   if (service.isConnected) {
-                                    service.disconnectAll();
+                                    await service.disconnectAll();
+                                    showToast(
+                                      'Desconectado de todos los puertos',
+                                    );
                                   } else {
-                                    service.connectMultiple();
+                                    bool succes = service.connectMultiple();
+                                    if (!succes) {
+                                      showToast(
+                                        'Error al conectar a los puertos seleccionados',
+                                      );
+                                    } else {
+                                      showToast(
+                                        'Conectado a los puertos seleccionados',
+                                      );
+                                    }
                                   }
                                   setState(() {});
                                 },
@@ -268,6 +655,26 @@ class MenuPageState extends State<MenuPage> {
                           service.sendMessage(message);
                         },
                       ),
+                      const Spacer(),
+                      ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.redAccent,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                        ),
+                        onPressed:
+                            service.selectedPortNames.isEmpty
+                                ? null
+                                : _eraseFlash,
+                        icon: const Icon(Icons.delete_forever, size: 18),
+                        label: const Text(
+                          'Erase Flash',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
                     ],
                   ),
                 ),

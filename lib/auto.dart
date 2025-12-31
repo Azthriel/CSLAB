@@ -2,11 +2,11 @@
 
 import 'dart:convert';
 import 'dart:io';
-
-import 'package:cs_laboratorio/tools.dart';
+import 'package:cslab/secret.dart';
+import 'package:cslab/tools.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
-import 'package:cs_laboratorio/master.dart';
+import 'package:cslab/master.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -17,6 +17,9 @@ class _DeviceInfo {
   final String serial;
   final String port;
   bool hasError = false;
+  String errorMessage = '';
+  int retryCount = 0;
+
   _DeviceInfo(this.productCode, this.serial, this.port);
 }
 
@@ -29,6 +32,7 @@ class AutoPage extends StatefulWidget {
 
 class AutoPageState extends State<AutoPage> {
   final service = SerialService();
+  final settings = AppSettings(); // Usar configuraciones dinámicas
 
   final _productCodeController = TextEditingController();
   final _hwVersionController = TextEditingController();
@@ -142,200 +146,363 @@ class AutoPageState extends State<AutoPage> {
         'magenta',
       );
 
-      // 6) Capturar y cerrar puertos
-
-      printLog('Ports to process: $ports', 'azul');
+      // 6) Capturar y cerrar puertos con delay
+      printLog('Closing all ports before flashing...', 'azul');
       for (final port in ports) {
         try {
-          service.disconnectPort(port);
+          await service.disconnectPort(port);
           printLog('Port closed: $port', 'verde');
         } catch (e) {
           printLog('Error closing port $port: $e', 'rojo');
         }
       }
 
-      // 7) Flashear todos los puertos
-      // 7) Flashear todos los dispositivos, usando la lista de devices
-      for (final device in devices) {
-        if (device.hasError) continue;
-        final rawPort = device.port;
-        final portArg =
-            (rawPort.startsWith('COM') && rawPort.length > 4)
-                ? r'\\.\' + rawPort
-                : rawPort;
+      // Dar tiempo al OS para liberar los puertos
+      await Future.delayed(const Duration(milliseconds: 2000));
 
+      // 7) Flashear dispositivos con procesamiento paralelo controlado
+      printLog(
+        'Starting parallel flash process (max ${settings.maxConcurrentFlash} concurrent)',
+        'amarillo',
+      );
+
+      // Dividir en batches para no sobrecargar
+      for (int i = 0; i < devices.length; i += settings.maxConcurrentFlash) {
+        final batch =
+            devices.skip(i).take(settings.maxConcurrentFlash).toList();
         printLog(
-          'Flashing ${device.productCode}:${device.serial} on $portArg at 576000 baud',
-          'amarillo',
+          'Flashing batch ${i ~/ settings.maxConcurrentFlash + 1}: ${batch.length} devices',
+          'cyan',
         );
 
-        final args = [
-          '-m',
-          'esptool',
-          '--chip',
-          'esp32c3',
-          '--port',
-          portArg,
-          '--baud',
-          '576000',
-          '--before',
-          'default_reset',
-          '--after',
-          'hard_reset',
-          'write_flash',
-          '-z',
-          '0x0000',
-          localPaths['bootloader.bin']!,
-          '0x8000',
-          localPaths['partitions.bin']!,
-          '0xE000',
-          localPaths['boot_app0.bin']!,
-          '0x10000',
-          localPaths['firmware.bin']!,
-        ];
-        printLog('esptool args: $args');
+        // Flashear batch en paralelo
+        await Future.wait(
+          batch.map((device) => _flashDevice(device, localPaths, pythonExe)),
+        );
 
-        final result = await Process.run(pythonExe, args);
-        printLog('esptool exitCode=${result.exitCode}');
-        if (result.stdout.isNotEmpty) printLog('stdout: ${result.stdout}');
-        if (result.stderr.isNotEmpty) {
-          printLog('stderr: ${result.stderr}', 'rojo');
-        }
-
-        if (result.exitCode != 0) {
-          showToast('Error flasheando ${device.port}');
-          // Aquí incluimos el serial correcto en el reporte
-          final reason =
-              result.stderr?.toString().trim().replaceAll('\n', ' ') ??
-              'Exit code ${result.exitCode}';
-          _reportLines.add(
-            '${device.productCode}:${device.serial}@${device.port} ---> ERROR (Flash): $reason',
-          );
-          device.hasError = true;
-          continue;
-        } else {
-          showToast('Flasheo exitoso en ${device.port}');
-          _reportLines.add(
-            '${device.productCode}:${device.serial}@${device.port} ---> COMPLETADO (Flash)',
-          );
+        // Delay entre batches
+        if (i + settings.maxConcurrentFlash < devices.length) {
+          await Future.delayed(const Duration(seconds: 1));
         }
       }
 
-      await Future.delayed(const Duration(seconds: 1));
+      await Future.delayed(const Duration(seconds: 2));
 
-      // 9) Cambiar Número de Serie a todos
+      // 8) Cambiar Número de Serie con reintentos
+      printLog('Starting serial number programming...', 'amarillo');
       for (final device in devices) {
-        // Re-conectar puerto
-        service.connectPort(device.port);
-        if (!service.isConnected) {
+        if (device.hasError) continue;
+
+        // Re-conectar puerto con retry
+        final connected = await service.connectPort(device.port);
+        if (!connected) {
           printLog('Cannot reconnect to ${device.port}', 'rojo');
           _reportLines.add(
-            '${device.productCode}:${device.serial}@${device.port} ---> ERROR (connect)',
+            '${device.productCode}:${device.serial}@${device.port} ---> ERROR (reconnect)',
           );
           device.hasError = true;
           continue;
         }
-        if (device.hasError) continue;
+
+        // Esperar estabilización
+        await Future.delayed(const Duration(milliseconds: 500));
+
         try {
           String msg = jsonEncode({"cmd": 4, "content": device.serial});
-          service.sendToPort(device.port, msg);
-          printLog('Sent SN ${device.serial} to ${device.port}', 'azul');
-          showToast('Enviando SN ${device.serial} a ${device.port}');
-          _reportLines.add(
-            '${device.productCode}:${device.serial}@${device.port} ---> COMPLETADO (SerialNumber)',
-          );
+          final sent = await service.sendToPort(device.port, msg);
+
+          if (sent) {
+            printLog('Sent SN ${device.serial} to ${device.port}', 'verde');
+            showToast('SN ${device.serial} enviado a ${device.port}');
+            _reportLines.add(
+              '${device.productCode}:${device.serial}@${device.port} ---> COMPLETADO (SerialNumber)',
+            );
+          } else {
+            throw Exception('Failed to send serial number');
+          }
         } catch (e) {
           printLog('Error sending SN to ${device.port}: $e', 'rojo');
           _reportLines.add(
-            '${device.productCode}:${device.serial}@${device.port} ---> ERROR (SerialNumber)',
+            '${device.productCode}:${device.serial}@${device.port} ---> ERROR (SerialNumber): $e',
           );
           device.hasError = true;
-          continue;
         }
+
+        // Delay entre dispositivos
+        await Future.delayed(settings.deviceDelay);
       }
 
-      // 10) Crear Things y cargar certificados
-      final uri = Uri.parse(
-        'https://7afkb3q46b.execute-api.sa-east-1.amazonaws.com/v1/THINGS',
-      );
+      // 9) Crear Things y cargar certificados con mejoras
+      final uri = Uri.parse(createThingURL);
+
       for (final device in devices) {
         if (device.hasError) continue;
         final thingName = '${device.productCode}:${device.serial}';
         printLog('Creating Thing $thingName', 'amarillo');
 
-        final body = jsonEncode({'thingName': thingName});
-        final response = await http.post(uri, body: body);
-        if (response.statusCode != 200) {
-          printLog('HTTP ${response.statusCode} for $thingName', 'rojo');
+        // Crear Thing con retry
+        Map<String, dynamic>? payload;
+        for (int retry = 0; retry < settings.maxRetriesFlash; retry++) {
+          try {
+            final body = jsonEncode({'thingName': thingName});
+            final response = await http
+                .post(uri, body: body)
+                .timeout(const Duration(seconds: 10));
+
+            if (response.statusCode == 200) {
+              final jsonResponse =
+                  jsonDecode(response.body) as Map<String, dynamic>;
+              payload =
+                  jsonDecode(jsonResponse['body'] as String)
+                      as Map<String, dynamic>;
+              break;
+            } else {
+              printLog(
+                'HTTP ${response.statusCode} for $thingName (attempt ${retry + 1})',
+                'rojo',
+              );
+              if (retry < settings.maxRetriesFlash - 1) {
+                await Future.delayed(Duration(seconds: retry + 1));
+              }
+            }
+          } catch (e) {
+            printLog(
+              'Exception creating thing (attempt ${retry + 1}): $e',
+              'rojo',
+            );
+            if (retry < settings.maxRetries - 1) {
+              await Future.delayed(Duration(seconds: retry + 1));
+            }
+          }
+        }
+
+        if (payload == null) {
           _reportLines.add(
-            '${device.productCode}:${device.serial}@${device.port} ---> ERROR (HTTP ${response.statusCode})',
+            '${device.productCode}:${device.serial}@${device.port} ---> ERROR (Thing creation failed)',
           );
           device.hasError = true;
           continue;
         }
 
-        final jsonResponse = jsonDecode(response.body) as Map<String, dynamic>;
-        final payload =
-            jsonDecode(jsonResponse['body'] as String) as Map<String, dynamic>;
         final amazonCA = payload['amazonCA'] as String;
         final deviceCert = payload['deviceCert'] as String;
         final privateKey = payload['privateKey'] as String;
 
-        printLog('DeviceCert: $deviceCert', 'verde');
-        printLog('PrivateKey: $privateKey', 'verde');
-        printLog('AmazonCA: $amazonCA', 'verde');
+        printLog('Sending certificates to ${device.port}...', 'cyan');
 
-        // Enviar certificados
-        for (final line in amazonCA.split('\n')) {
-          if (line.isEmpty || line == ' ') break;
-          printLog('Sending AmazonCA line: $line', 'verde');
-          service.sendToPort(
-            device.port,
-            jsonEncode({"cmd": 6, "content": "0#$line"}),
+        // Enviar certificados con mejor manejo
+        try {
+          await _sendCertificateLines(device, amazonCA, '0', 'AmazonCA');
+          await _sendCertificateLines(device, deviceCert, '1', 'DeviceCert');
+          await _sendCertificateLines(device, privateKey, '2', 'PrivateKey');
+
+          printLog('Thing $thingName loaded successfully', 'verde');
+          _reportLines.add(
+            '${device.productCode}:${device.serial}@${device.port} ---> COMPLETADO (Thing)',
           );
-          await Future.delayed(const Duration(milliseconds: 200));
-        }
-        for (final line in deviceCert.split('\n')) {
-          if (line.isEmpty || line == ' ') break;
-          printLog('Sending DeviceCert line: $line', 'verde');
-          service.sendToPort(
-            device.port,
-            jsonEncode({"cmd": 6, "content": "1#$line"}),
+        } catch (e) {
+          printLog('Error sending certificates to ${device.port}: $e', 'rojo');
+          _reportLines.add(
+            '${device.productCode}:${device.serial}@${device.port} ---> ERROR (Certificates): $e',
           );
-          await Future.delayed(const Duration(milliseconds: 200));
-        }
-        for (final line in privateKey.split('\n')) {
-          if (line.isEmpty || line == ' ') break;
-          printLog('Sending PrivateKey line: $line', 'verde');
-          service.sendToPort(
-            device.port,
-            jsonEncode({"cmd": 6, "content": "2#$line"}),
-          );
-          await Future.delayed(const Duration(milliseconds: 200));
+          device.hasError = true;
         }
 
-        printLog('Thing $thingName loaded', 'verde');
-        _reportLines.add(
-          '${device.productCode}:${device.serial}@${device.port} ---> COMPLETADO (Thing)',
-        );
+        // Delay entre dispositivos
+        await Future.delayed(settings.deviceDelay);
       }
 
-      // 11) Generar archivo de reporte
+      // 10) Generar archivo de reporte con resumen
+      final successCount = devices.where((d) => !d.hasError).length;
+      final failCount = devices.where((d) => d.hasError).length;
+
+      final reportHeader = [
+        '=' * 60,
+        'Reporte de Programación - ${DateTime.now()}',
+        'Total dispositivos: ${devices.length}',
+        'Exitosos: $successCount',
+        'Fallidos: $failCount',
+        '=' * 60,
+        '',
+      ];
+
       final reportFile = File(
         p.join(File(Platform.resolvedExecutable).parent.path, 'report.txt'),
       );
-      await reportFile.writeAsString(_reportLines.join('\r\n'));
+      await reportFile.writeAsString(
+        [...reportHeader, ..._reportLines].join('\r\n'),
+      );
 
-      showToast('Proceso completo. Revisa report.txt');
+      final reportPath = reportFile.path;
+      printLog('Reporte guardado en: $reportPath', 'verde');
+
+      showToast(
+        'Proceso completo. $successCount OK, $failCount errores. Ver report.txt',
+      );
     } catch (e, st) {
       printLog('Error en runAll: $e\n$st', 'rojo');
-      showToast('Error en proceso: $e');
+      showToast('Error crítico en proceso: $e');
+      _reportLines.add('ERROR CRÍTICO: $e');
     } finally {
-      setState(() {
-        _isRunning = false;
-      });
+      // Actualizar UI
+      if (mounted) {
+        setState(() {
+          _isRunning = false;
+        });
+      }
       printLog('runAll finished', 'verde');
     }
+  }
+
+  /// Flashea un dispositivo individual con reintentos
+  Future<void> _flashDevice(
+    _DeviceInfo device,
+    Map<String, String> localPaths,
+    String pythonExe,
+  ) async {
+    if (device.hasError) return;
+
+    final rawPort = device.port;
+    final portArg =
+        (rawPort.startsWith('COM') && rawPort.length > 4)
+            ? r'\\.\' + rawPort
+            : rawPort;
+
+    printLog(
+      'Flashing ${device.productCode}:${device.serial} on $portArg',
+      'amarillo',
+    );
+
+    final args = [
+      '-m',
+      'esptool',
+      '--chip',
+      'esp32c3',
+      '--port',
+      portArg,
+      '--baud',
+      '${service.baudRate}',
+      '--before',
+      'default_reset',
+      '--after',
+      'hard_reset',
+      '--connect-attempts',
+      '5',
+      'write_flash',
+      '-z',
+      '0x0000',
+      localPaths['bootloader.bin']!,
+      '0x8000',
+      localPaths['partitions.bin']!,
+      '0xE000',
+      localPaths['boot_app0.bin']!,
+      '0x10000',
+      localPaths['firmware.bin']!,
+    ];
+
+    for (int retry = 0; retry < settings.maxRetriesFlash; retry++) {
+      try {
+        final result = await Process.run(
+          pythonExe,
+          args,
+        ).timeout(const Duration(seconds: 60));
+
+        printLog('esptool exitCode=${result.exitCode} for ${device.port}');
+
+        if (result.exitCode == 0) {
+          showToast('Flasheo exitoso en ${device.port}');
+          if (mounted) {
+            setState(() {
+              _reportLines.add(
+                '${device.productCode}:${device.serial}@${device.port} ---> COMPLETADO (Flash)',
+              );
+            });
+          }
+          return;
+        } else {
+          final reason =
+              result.stderr?.toString().trim().replaceAll('\n', ' ') ??
+              'Exit code ${result.exitCode}';
+          printLog('Flash failed for ${device.port}: $reason', 'rojo');
+
+          if (retry < settings.maxRetriesFlash - 1) {
+            printLog(
+              'Retrying flash for ${device.port} (${retry + 1}/${settings.maxRetriesFlash})',
+              'amarillo',
+            );
+            await Future.delayed(Duration(seconds: retry + 2));
+          } else {
+            device.hasError = true;
+            device.errorMessage = reason;
+            if (mounted) {
+              setState(() {
+                _reportLines.add(
+                  '${device.productCode}:${device.serial}@${device.port} ---> ERROR (Flash): $reason',
+                );
+              });
+            }
+          }
+        }
+      } catch (e) {
+        printLog('Exception flashing ${device.port}: $e', 'rojo');
+        if (retry < settings.maxRetriesFlash - 1) {
+          await Future.delayed(Duration(seconds: retry + 2));
+        } else {
+          device.hasError = true;
+          device.errorMessage = e.toString();
+          if (mounted) {
+            setState(() {
+              _reportLines.add(
+                '${device.productCode}:${device.serial}@${device.port} ---> ERROR (Flash): $e',
+              );
+            });
+          }
+        }
+      }
+    }
+  }
+
+  /// Envía líneas de certificado con validación
+  Future<void> _sendCertificateLines(
+    _DeviceInfo device,
+    String certificate,
+    String certType,
+    String certName,
+  ) async {
+    final lines =
+        certificate
+            .split('\n')
+            .where((line) => line.trim().isNotEmpty)
+            .toList();
+
+    printLog(
+      'Sending $certName to ${device.port}: ${lines.length} lines',
+      'cyan',
+    );
+
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i].trim();
+      if (line.isEmpty) continue;
+
+      final msg = jsonEncode({"cmd": 6, "content": "$certType#$line"});
+      final sent = await service.sendToPort(device.port, msg);
+
+      if (!sent) {
+        throw Exception(
+          'Failed to send $certName line ${i + 1}/${lines.length}',
+        );
+      }
+
+      // Delay entre líneas (más largo que antes)
+      await Future.delayed(settings.certLineDelay);
+
+      // Log cada 10 líneas
+      if ((i + 1) % 10 == 0) {
+        printLog('  Progress: ${i + 1}/${lines.length} lines sent', 'verde');
+      }
+    }
+
+    printLog('$certName sent successfully to ${device.port}', 'verde');
   }
 
   @override
