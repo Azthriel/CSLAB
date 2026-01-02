@@ -76,6 +76,8 @@ class _ThingMakerState extends State<ThingMaker> {
         String deviceCert = body['deviceCert'];
         String privateKey = body['privateKey'];
 
+        registerActivity(pc, sn, "Thing creado desde CSLAB");
+
         printLog('Certificado: $deviceCert', "Cyan");
         printLog('Llave privada: $privateKey', "Cyan");
         printLog('Amazon CA: $amazonCA', "Cyan");
@@ -105,6 +107,11 @@ class _ThingMakerState extends State<ThingMaker> {
       } else {
         printLog('Error: ${response.statusCode}');
         showToast('Error al crear el Thing: $thingName');
+        registerActivity(
+          pc,
+          sn,
+          "Error al crear Thing: ${response.statusCode}",
+        );
       }
     }
 

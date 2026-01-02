@@ -90,9 +90,19 @@ class ToolsPageState extends State<ToolsPage> {
 
       if (sent) {
         showToast('SN $serialNum cargado a $portName');
+        registerActivity(
+          _productCodeController.text.trim(),
+          serialNum,
+          "Se le envió número de serie desde CSLAB",
+        );
         successCount++;
       } else {
         showToast('Error cargando SN a $portName');
+        registerActivity(
+          _productCodeController.text.trim(),
+          serialNum,
+          "Error enviando número de serie desde CSLAB",
+        );
         failCount++;
       }
 
@@ -454,7 +464,9 @@ class ToolsPageState extends State<ToolsPage> {
               const SizedBox(height: 16),
               buildButton(
                 onPressed:
-                    service.selectedPortNames.isEmpty || _isChangingSN
+                    service.selectedPortNames.isEmpty ||
+                            _isChangingSN ||
+                            _productCodeController.text.isEmpty
                         ? null
                         : programSerials,
                 text:

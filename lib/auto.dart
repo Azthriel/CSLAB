@@ -112,6 +112,8 @@ class AutoPageState extends State<AutoPage> {
       );
       printLog('Using software folder: $folderName', 'verde');
 
+      versionToUpload = folderName;
+
       // 3) Descargar firmware (excepto boot_app0.bin)
       final tempDir = await getTemporaryDirectory();
       final Map<String, String> localPaths = {};
@@ -212,6 +214,11 @@ class AutoPageState extends State<AutoPage> {
           final sent = await service.sendToPort(device.port, msg);
 
           if (sent) {
+            registerActivity(
+              device.productCode,
+              device.serial,
+              "Se le envió número de serie",
+            );
             printLog('Sent SN ${device.serial} to ${device.port}', 'verde');
             showToast('SN ${device.serial} enviado a ${device.port}');
             _reportLines.add(
@@ -222,6 +229,11 @@ class AutoPageState extends State<AutoPage> {
           }
         } catch (e) {
           printLog('Error sending SN to ${device.port}: $e', 'rojo');
+          registerActivity(
+            device.productCode,
+            device.serial,
+            "Error enviando número de serie: $e",
+          );
           _reportLines.add(
             '${device.productCode}:${device.serial}@${device.port} ---> ERROR (SerialNumber): $e',
           );
@@ -277,6 +289,11 @@ class AutoPageState extends State<AutoPage> {
         }
 
         if (payload == null) {
+          registerActivity(
+            device.productCode,
+            device.serial,
+            "Error al crear Thing: falló después de ${settings.maxRetriesFlash} intentos",
+          );
           _reportLines.add(
             '${device.productCode}:${device.serial}@${device.port} ---> ERROR (Thing creation failed)',
           );
@@ -297,11 +314,21 @@ class AutoPageState extends State<AutoPage> {
           await _sendCertificateLines(device, privateKey, '2', 'PrivateKey');
 
           printLog('Thing $thingName loaded successfully', 'verde');
+          registerActivity(
+            device.productCode,
+            device.serial,
+            "Se le cargo Thing desde CSLAB",
+          );
           _reportLines.add(
             '${device.productCode}:${device.serial}@${device.port} ---> COMPLETADO (Thing)',
           );
         } catch (e) {
           printLog('Error sending certificates to ${device.port}: $e', 'rojo');
+          registerActivity(
+            device.productCode,
+            device.serial,
+            "Error cargando Thing: $e",
+          );
           _reportLines.add(
             '${device.productCode}:${device.serial}@${device.port} ---> ERROR (Certificates): $e',
           );
@@ -362,6 +389,12 @@ class AutoPageState extends State<AutoPage> {
   ) async {
     if (device.hasError) return;
 
+    registerActivity(
+      device.productCode,
+      device.serial,
+      "Se comenzo el flasheo con versión $versionToUpload",
+    );
+
     final rawPort = device.port;
     final portArg =
         (rawPort.startsWith('COM') && rawPort.length > 4)
@@ -411,6 +444,11 @@ class AutoPageState extends State<AutoPage> {
 
         if (result.exitCode == 0) {
           showToast('Flasheo exitoso en ${device.port}');
+          registerActivity(
+            device.productCode,
+            device.serial,
+            "Flasheo exitoso con versión $versionToUpload",
+          );
           if (mounted) {
             setState(() {
               _reportLines.add(
@@ -434,6 +472,11 @@ class AutoPageState extends State<AutoPage> {
           } else {
             device.hasError = true;
             device.errorMessage = reason;
+            registerActivity(
+              device.productCode,
+              device.serial,
+              "Error en flasheo: $reason",
+            );
             if (mounted) {
               setState(() {
                 _reportLines.add(

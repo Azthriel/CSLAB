@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
@@ -45,6 +45,10 @@ const bool xReleaseMode = bool.fromEnvironment('dart.vm.product');
 const bool xDebugMode = !xProfileMode && !xReleaseMode;
 // const bool xDebugMode = true;
 //*-Estado de app-*\\
+
+//*- Versión a flashear en equipos -*\\
+String versionToUpload = '';
+//*- Versión a flashear en equipos -*\\
 
 //! FUNCIONES !\\
 
@@ -427,6 +431,56 @@ Future<void> ensurePythonEmbed() async {
     }
   }
 }
+
+//*-Registro de actividad-*\\
+void registerActivity(
+  String productCode,
+  String serialNumber,
+  String accion,
+) async {
+  try {
+    FirebaseFirestore db = FirebaseFirestore.instance;
+
+    String diaDeLaFecha = DateTime.now()
+        .toString()
+        .split(' ')[0]
+        .replaceAll('-', '');
+
+    String documentPath = '$productCode:$serialNumber';
+
+    String actionListName = '$diaDeLaFecha:$legajoConectado';
+
+    DocumentReference docRef = db.collection('Registro').doc(documentPath);
+
+    DocumentSnapshot doc = await docRef.get();
+
+    if (!doc.exists) {
+      await docRef
+          .set({
+            actionListName: FieldValue.arrayUnion([accion]),
+          })
+          .then((_) {
+            printLog("Documento creado exitosamente!");
+          })
+          .catchError((error) {
+            printLog("Error creando el documento: $error");
+          });
+    } else {
+      printLog("Documento ya existe.");
+      await docRef
+          .update({
+            actionListName: FieldValue.arrayUnion([accion]),
+          })
+          .catchError(
+            (error) => printLog("Error al añadir item al array: $error"),
+          );
+    }
+  } catch (e, s) {
+    printLog('Error al registrar actividad: $e');
+    printLog(s);
+  }
+}
+//*-Registro de actividad-*\\
 
 //! Clases !\\
 
