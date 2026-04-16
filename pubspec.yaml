@@ -1,7 +1,7 @@
 name: cslab
 description: "App de escritorio."
 publish_to: "none"
-version: 16.0.61+1
+version: 2.0.3+666
 
 environment:
   sdk: ^3.7.2
@@ -40,3 +40,4 @@ flutter:
     - assets/misc/Dragon.png
     - assets/python-embed.zip
     - assets/boot_app0.bin
+    - pubspec.yaml

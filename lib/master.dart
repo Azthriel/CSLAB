@@ -12,9 +12,7 @@ import 'package:path/path.dart' as p;
 
 //! VARIABLES !\\
 
-//!-------------------------VERSION NUMBER-------------------------!\\
-const String appVersionNumber = '2.0.2';
-//!-------------------------VERSION NUMBER-------------------------!\\
+String appVersionNumber = '1.0.0';
 
 //*-Colores-*\\
 const Color color0 = Color(0xFF0F2A1D);
@@ -89,14 +87,12 @@ void printLog(var text, [String? color]) {
     color = '\x1B[0m';
   }
   if (xDebugMode) {
-    if (Platform.isWindows) {
-      // ignore: avoid_print
-      print('${color}PrintData: $text\x1B[0m');
-      // Platform.isWindows ? stdout.write('${color}PrintData: $text\x1B[0m') : null;
-    } else {
-      // ignore: avoid_print
-      print("PrintData: $text");
-    }
+    // ignore: avoid_print
+    print('${color}PrintData: $text\x1B[0m');
+    // Platform.isWindows ? stdout.write('${color}PrintData: $text\x1B[0m') : null;
+  } else {
+    // ignore: avoid_print
+    print(text);
   }
 }
 //*-Permite hacer prints seguros, solo en modo debug-*\\
@@ -481,6 +477,22 @@ void registerActivity(
   }
 }
 //*-Registro de actividad-*\\
+
+Future<String> getAppVersion() async {
+  try {
+    final pubspecText = await rootBundle.loadString('pubspec.yaml');
+    for (var line in pubspecText.split('\n')) {
+      if (line.trim().startsWith('version:')) {
+        final fullVersion = line.split(':')[1].trim();
+        final cleanVersion = fullVersion.split('+')[0];
+        return cleanVersion;
+      }
+    }
+    return '1.0.0';
+  } catch (e) {
+    return '1.0.0';
+  }
+}
 
 //! Clases !\\
 

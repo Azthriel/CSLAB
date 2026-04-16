@@ -6,18 +6,12 @@
 #include "utils.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
-                      _In_ wchar_t *command_line, _In_ int show_command) {
-  // En builds de debug siempre abre una ventana de consola para ver los logs.
-  // En release solo se adjunta si ya hay una consola padre (ej: flutter run).
-#ifdef _DEBUG
-  if (!::AttachConsole(ATTACH_PARENT_PROCESS)) {
+                      _In_ wchar_t *command_line, _In_ int show_command)
+{
+  if (!::AttachConsole(ATTACH_PARENT_PROCESS))
+  {
     CreateAndAttachConsole();
   }
-#else
-  if (!::AttachConsole(ATTACH_PARENT_PROCESS) && ::IsDebuggerPresent()) {
-    CreateAndAttachConsole();
-  }
-#endif
 
   // Initialize COM, so that it is available for use in the library and/or
   // plugins.
@@ -33,13 +27,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"cs_laboratorio", origin, size)) {
+  if (!window.Create(L"cs_laboratorio", origin, size))
+  {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
 
   ::MSG msg;
-  while (::GetMessage(&msg, nullptr, 0, 0)) {
+  while (::GetMessage(&msg, nullptr, 0, 0))
+  {
     ::TranslateMessage(&msg);
     ::DispatchMessage(&msg);
   }

@@ -9,6 +9,7 @@ import 'firebase_options.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   printLog('Inicio de la aplicación');
+  appVersionNumber = await getAppVersion();
   printLog('Versión: $appVersionNumber');
   await ensurePythonEmbed();
   printLog('Python embebido inicializado');
@@ -30,8 +31,6 @@ class MyAppState extends State<MyApp> {
     super.initState();
 
     printLog('Iniciando FToast');
-    // Solo se instancia aquí; .init(context) se llama en cada ruta porque
-    // este context es anterior a MaterialApp y no tiene overlay todavía.
     fToast = FToast();
 
     printLog('FToast instanciado');
