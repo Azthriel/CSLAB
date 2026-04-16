@@ -2,6 +2,7 @@ import 'package:cslab/login.dart';
 import 'package:cslab/menu.dart';
 import 'package:flutter/material.dart';
 import 'package:cslab/master.dart';
+import 'package:flutter/services.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
@@ -9,10 +10,15 @@ import 'firebase_options.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   printLog('Inicio de la aplicación');
-  appVersionNumber = await getAppVersion();
+  appVersionNumber = await _getAppVersion();
   printLog('Versión: $appVersionNumber');
+
+  await ensureWindowsDeps();
+  printLog('Dependencias de Windows OK');
+
   await ensurePythonEmbed();
   printLog('Python embebido inicializado');
+
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   printLog('Firebase inicializado');
 
@@ -71,5 +77,21 @@ class MyAppState extends State<MyApp> {
       },
       debugShowCheckedModeBanner: false,
     );
+  }
+}
+
+Future<String> _getAppVersion() async {
+  try {
+    final pubspecText = await rootBundle.loadString('pubspec.yaml');
+    for (var line in pubspecText.split('\n')) {
+      if (line.trim().startsWith('version:')) {
+        final fullVersion = line.split(':')[1].trim();
+        final cleanVersion = fullVersion.split('+')[0];
+        return cleanVersion;
+      }
+    }
+    return '1.0.0';
+  } catch (e) {
+    return '1.0.0';
   }
 }

@@ -478,20 +478,50 @@ void registerActivity(
 }
 //*-Registro de actividad-*\\
 
-Future<String> getAppVersion() async {
-  try {
-    final pubspecText = await rootBundle.loadString('pubspec.yaml');
-    for (var line in pubspecText.split('\n')) {
-      if (line.trim().startsWith('version:')) {
-        final fullVersion = line.split(':')[1].trim();
-        final cleanVersion = fullVersion.split('+')[0];
-        return cleanVersion;
-      }
-    }
-    return '1.0.0';
-  } catch (e) {
-    return '1.0.0';
+Future<void> ensureWindowsDeps() async {
+  if (!Platform.isWindows) return;
+
+  final exeDir = File(Platform.resolvedExecutable).parent.path;
+
+  final doneMarker = File(p.join(exeDir, '.deps_ready'));
+  if (await doneMarker.exists()) {
+    printLog('Dependencias de Windows ya verificadas, skip.', 'verde');
+    return;
   }
+
+  printLog('Verificando dependencias de Windows...', 'amarillo');
+
+  // Extraer archivos desde assets
+  final batPath = p.join(exeDir, 'setup_deps.bat');
+  final redistPath = p.join(exeDir, 'vc_redist.x64.exe');
+
+  final batBytes = await rootBundle.load('assets/setup_deps.bat');
+  await File(batPath).writeAsBytes(batBytes.buffer.asUint8List());
+
+  final redistBytes = await rootBundle.load('assets/vc_redist.x64.exe');
+  await File(redistPath).writeAsBytes(redistBytes.buffer.asUint8List());
+
+  // Ejecutar y esperar que termine
+  final result = await Process.run('cmd', ['/c', batPath], runInShell: true);
+
+  printLog('setup_deps exit code: ${result.exitCode}');
+  if (result.stdout.toString().trim().isNotEmpty) {
+    printLog('setup_deps stdout: ${result.stdout}');
+  }
+  if (result.stderr.toString().trim().isNotEmpty) {
+    printLog('setup_deps stderr: ${result.stderr}', 'rojo');
+  }
+
+  try {
+    await File(batPath).delete();
+  } catch (_) {}
+  try {
+    await File(redistPath).delete();
+  } catch (_) {}
+
+  // Marcar como hecho
+  await doneMarker.writeAsString('ok');
+  printLog('Dependencias verificadas correctamente.', 'verde');
 }
 
 //! Clases !\\
