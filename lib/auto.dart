@@ -19,6 +19,17 @@ class _DeviceInfo {
   bool hasError = false;
   String errorMessage = '';
   int retryCount = 0;
+  double flashProgress = 0.0;
+  String flashStatus = 'Pendiente';
+  bool isFlashing = false;
+  // Paso general del proceso
+  String currentStep = 'Pendiente'; // 'Flash', 'Nº de Serie', 'Creando Thing', 'Certificados', 'Completado', 'Error'
+  // Progreso de certificados
+  String certCurrentName = '';
+  int certLinesSent = 0;
+  int certLinesTotal = 0;
+
+  String resultSummary = '';
 
   _DeviceInfo(this.productCode, this.serial, this.port);
 }
@@ -41,6 +52,9 @@ class AutoPageState extends State<AutoPage> {
   bool _isRunning = false;
   // ignore: prefer_final_fields
   List<String> _reportLines = [];
+  List<_DeviceInfo> _devices = [];
+  final List<String> _autoLog = [];
+  final ScrollController _logScrollController = ScrollController();
 
   static const _owner = 'barberop';
   static const _repo = 'sime-domotica';
@@ -54,7 +68,11 @@ class AutoPageState extends State<AutoPage> {
   }
 
   void _onServiceChanged() {
-    setState(() {});
+    if (!mounted) return;
+    // Diferir para no llamar setState durante un build en curso
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
@@ -63,6 +81,7 @@ class AutoPageState extends State<AutoPage> {
     _productCodeController.dispose();
     _hwVersionController.dispose();
     _startNumberController.dispose();
+    _logScrollController.dispose();
     super.dispose();
   }
 
@@ -78,6 +97,7 @@ class AutoPageState extends State<AutoPage> {
     setState(() {
       _isRunning = true;
       _reportLines.clear();
+      _autoLog.clear();
     });
 
     try {
@@ -103,6 +123,13 @@ class AutoPageState extends State<AutoPage> {
         final serial = '$yy$mm$dd$nn';
         devices.add(_DeviceInfo(productCode, serial, port));
         serialCounter++;
+      }
+
+      // Guardar devices en estado para mostrar progreso en UI
+      if (mounted) {
+        setState(() {
+          _devices = devices;
+        });
       }
 
       // 2) Obtener carpeta de firmware en GitHub
@@ -194,6 +221,8 @@ class AutoPageState extends State<AutoPage> {
       printLog('Starting serial number programming...', 'amarillo');
       for (final device in devices) {
         if (device.hasError) continue;
+        if (mounted) setState(() => device.currentStep = 'Nº de Serie');
+        _addAutoLog('[${_nowTs()}] ${device.port} → Enviando Nº de Serie: ${device.serial}');
 
         // Re-conectar puerto con retry
         final connected = await service.connectPort(device.port);
@@ -202,6 +231,8 @@ class AutoPageState extends State<AutoPage> {
           _reportLines.add(
             '${device.productCode}:${device.serial}@${device.port} ---> ERROR (reconnect)',
           );
+          device.resultSummary = 'No se pudo reconectar al puerto';
+          if (mounted) setState(() => device.currentStep = 'Error');
           device.hasError = true;
           continue;
         }
@@ -221,6 +252,7 @@ class AutoPageState extends State<AutoPage> {
             );
             printLog('Sent SN ${device.serial} to ${device.port}', 'verde');
             showToast('SN ${device.serial} enviado a ${device.port}');
+            _addAutoLog('[${_nowTs()}] ${device.port} ✓ Nº de Serie enviado: ${device.serial}');
             _reportLines.add(
               '${device.productCode}:${device.serial}@${device.port} ---> COMPLETADO (SerialNumber)',
             );
@@ -237,6 +269,8 @@ class AutoPageState extends State<AutoPage> {
           _reportLines.add(
             '${device.productCode}:${device.serial}@${device.port} ---> ERROR (SerialNumber): $e',
           );
+          device.resultSummary = 'Error N° de Serie: $e';
+          if (mounted) setState(() => device.currentStep = 'Error');
           device.hasError = true;
         }
 
@@ -249,8 +283,10 @@ class AutoPageState extends State<AutoPage> {
 
       for (final device in devices) {
         if (device.hasError) continue;
+        if (mounted) setState(() => device.currentStep = 'Creando Thing');
         final thingName = '${device.productCode}:${device.serial}';
         printLog('Creating Thing $thingName', 'amarillo');
+        _addAutoLog('[${_nowTs()}] ${device.port} → Creando Thing: $thingName');
 
         // Crear Thing con retry
         Map<String, dynamic>? payload;
@@ -294,9 +330,12 @@ class AutoPageState extends State<AutoPage> {
             device.serial,
             "Error al crear Thing: falló después de ${settings.maxRetriesFlash} intentos",
           );
+          if (mounted) setState(() => device.currentStep = 'Error');
+          _addAutoLog('[${_nowTs()}] ${device.port} ✗ Error creando Thing: agotados ${settings.maxRetriesFlash} intentos');
           _reportLines.add(
             '${device.productCode}:${device.serial}@${device.port} ---> ERROR (Thing creation failed)',
           );
+          device.resultSummary = 'Error al crear Thing (${settings.maxRetriesFlash} intentos)';
           device.hasError = true;
           continue;
         }
@@ -319,6 +358,9 @@ class AutoPageState extends State<AutoPage> {
             device.serial,
             "Se le cargo Thing desde CSLAB",
           );
+          device.resultSummary = 'v$versionToUpload · SN: ${device.serial} · Thing OK';
+          if (mounted) setState(() => device.currentStep = 'Completado');
+          _addAutoLog('[${_nowTs()}] ${device.port} ✓ Thing $thingName COMPLETADO');
           _reportLines.add(
             '${device.productCode}:${device.serial}@${device.port} ---> COMPLETADO (Thing)',
           );
@@ -329,6 +371,9 @@ class AutoPageState extends State<AutoPage> {
             device.serial,
             "Error cargando Thing: $e",
           );
+          device.resultSummary = 'Error cargando certificados: $e';
+          if (mounted) setState(() => device.currentStep = 'Error');
+          _addAutoLog('[${_nowTs()}] ${device.port} ✗ Error certificados: $e');
           _reportLines.add(
             '${device.productCode}:${device.serial}@${device.port} ---> ERROR (Certificates): $e',
           );
@@ -381,13 +426,33 @@ class AutoPageState extends State<AutoPage> {
     }
   }
 
-  /// Flashea un dispositivo individual con reintentos
+  /// Parsea el progreso desde la salida de esptool
+  double _parseEsptoolProgress(String line) {
+    // esptool muestra progreso como: "Writing at 0x00010000... (1 %)" o similar
+    final percentMatch = RegExp(r'\((\d+)\s*%\)').firstMatch(line);
+    if (percentMatch != null) {
+      final percent = int.tryParse(percentMatch.group(1) ?? '0') ?? 0;
+      return percent / 100.0;
+    }
+    return -1; // No se encontró progreso
+  }
+
+  /// Flashea un dispositivo individual con reintentos y streaming de output
   Future<void> _flashDevice(
     _DeviceInfo device,
     Map<String, String> localPaths,
     String pythonExe,
   ) async {
     if (device.hasError) return;
+
+    if (mounted) {
+      setState(() {
+        device.isFlashing = true;
+        device.flashStatus = 'Iniciando...';
+        device.flashProgress = 0.0;
+        device.currentStep = 'Flash';
+      });
+    }
 
     registerActivity(
       device.productCode,
@@ -407,6 +472,7 @@ class AutoPageState extends State<AutoPage> {
     );
 
     final args = [
+      '-u', // Unbuffered output para ver progreso en tiempo real
       '-m',
       'esptool',
       '--chip',
@@ -435,20 +501,121 @@ class AutoPageState extends State<AutoPage> {
 
     for (int retry = 0; retry < settings.maxRetriesFlash; retry++) {
       try {
-        final result = await Process.run(
-          pythonExe,
-          args,
-        ).timeout(const Duration(seconds: 60));
+        if (mounted) {
+          setState(() {
+            device.flashStatus =
+                retry > 0
+                    ? 'Reintento ${retry + 1}/${settings.maxRetriesFlash}'
+                    : 'Conectando...';
+            device.flashProgress = 0.0;
+          });
+        }
 
-        printLog('esptool exitCode=${result.exitCode} for ${device.port}');
+        // Usar Process.start para streaming de output
+        final process = await Process.start(pythonExe, args, runInShell: false);
 
-        if (result.exitCode == 0) {
+        final stdoutBuffer = StringBuffer();
+        final stderrBuffer = StringBuffer();
+
+        // Escuchar stdout en tiempo real
+        final stdoutSubscription = process.stdout
+            .transform(const SystemEncoding().decoder)
+            .transform(const LineSplitter())
+            .listen((line) {
+              stdoutBuffer.writeln(line);
+              printLog('[${device.port}] stdout: $line', 'cyan');
+
+              // Parsear progreso
+              final progress = _parseEsptoolProgress(line);
+              if (progress >= 0 && mounted) {
+                setState(() {
+                  device.flashProgress = progress;
+                  device.flashStatus =
+                      'Escribiendo... ${(progress * 100).toInt()}%';
+                });
+              }
+
+              // Detectar etapas del proceso
+              if (line.contains('Connecting')) {
+                if (mounted) {
+                  setState(() {
+                    device.flashStatus = 'Conectando al ESP32...';
+                  });
+                }
+              } else if (line.contains('Chip is')) {
+                if (mounted) {
+                  setState(() {
+                    device.flashStatus = 'Chip detectado';
+                  });
+                }
+              } else if (line.contains('Erasing flash')) {
+                if (mounted) {
+                  setState(() {
+                    device.flashStatus = 'Borrando flash...';
+                  });
+                }
+              } else if (line.contains('Hard resetting')) {
+                if (mounted) {
+                  setState(() {
+                    device.flashProgress = 1.0;
+                    device.flashStatus = 'Reiniciando...';
+                  });
+                }
+              }
+
+              // Detectar errores en tiempo real
+              final lineLower = line.toLowerCase();
+              if (lineLower.contains('serial exception') ||
+                  lineLower.contains('write timeout') ||
+                  lineLower.contains('failed to connect') ||
+                  lineLower.contains('could not open port')) {
+                if (mounted) {
+                  setState(() {
+                    device.flashStatus = '⚠ $line';
+                  });
+                }
+              }
+            });
+
+        // Escuchar stderr en tiempo real
+        final stderrSubscription = process.stderr
+            .transform(const SystemEncoding().decoder)
+            .transform(const LineSplitter())
+            .listen((line) {
+              stderrBuffer.writeln(line);
+              printLog('[${device.port}] stderr: $line', 'rojo');
+            });
+
+        // Esperar a que termine el proceso con timeout
+        final exitCode = await process.exitCode.timeout(
+          const Duration(seconds: 120),
+          onTimeout: () {
+            process.kill();
+            return -1;
+          },
+        );
+
+        // Cancelar subscripciones
+        await stdoutSubscription.cancel();
+        await stderrSubscription.cancel();
+
+        printLog('esptool exitCode=$exitCode for ${device.port}');
+
+        if (exitCode == 0) {
+          if (mounted) {
+            setState(() {
+              device.flashProgress = 1.0;
+              device.flashStatus = '✓ Completado';
+              device.isFlashing = false;
+            });
+          }
           showToast('Flasheo exitoso en ${device.port}');
           registerActivity(
             device.productCode,
             device.serial,
             "Flasheo exitoso con versión $versionToUpload",
           );
+          device.resultSummary = 'Flash OK · v$versionToUpload';
           if (mounted) {
             setState(() {
               _reportLines.add(
@@ -458,10 +625,72 @@ class AutoPageState extends State<AutoPage> {
           }
           return;
         } else {
-          final reason =
-              result.stderr?.toString().trim().replaceAll('\n', ' ') ??
-              'Exit code ${result.exitCode}';
+          // Construir mensaje de error detallado
+          final stderrOutput = stderrBuffer.toString().trim();
+          final stdoutOutput = stdoutBuffer.toString().trim();
+
+          String reason;
+
+          // Primero buscar en stdout ya que esptool escribe errores ahí
+          final allOutput = '$stdoutOutput\n$stderrOutput';
+          final allLines =
+              allOutput.split('\n').where((l) => l.trim().isNotEmpty).toList();
+
+          // Patrones de error conocidos de esptool (case insensitive)
+          final errorPatterns = [
+            'serial exception',
+            'write timeout',
+            'read timeout',
+            'could not open port',
+            'permission denied',
+            'failed to connect',
+            'no serial data',
+            'invalid head of packet',
+            'wrong boot mode',
+            'chip sync error',
+            'a]fatal error',
+          ];
+
+          // Buscar línea con patrón de error conocido
+          String? foundError;
+          for (final line in allLines) {
+            final lineLower = line.toLowerCase();
+            for (final pattern in errorPatterns) {
+              if (lineLower.contains(pattern)) {
+                foundError = line.trim();
+                break;
+              }
+            }
+            if (foundError != null) break;
+          }
+
+          if (foundError != null) {
+            reason = foundError;
+          } else {
+            // Buscar cualquier línea que contenga "error" o "failed"
+            final errorLine = allLines.firstWhere((line) {
+              final lower = line.toLowerCase();
+              return lower.contains('error') ||
+                  lower.contains('failed') ||
+                  lower.contains('exception');
+            }, orElse: () => '');
+
+            if (errorLine.isNotEmpty) {
+              reason = errorLine.trim();
+            } else {
+              reason = 'Exit code $exitCode';
+            }
+          }
+
           printLog('Flash failed for ${device.port}: $reason', 'rojo');
+          printLog('Full stderr: $stderrOutput', 'rojo');
+          printLog('Full stdout: $stdoutOutput', 'amarillo');
+
+          if (mounted) {
+            setState(() {
+              device.flashStatus = '✗ Error: $reason';
+            });
+          }
 
           if (retry < settings.maxRetriesFlash - 1) {
             printLog(
@@ -472,6 +701,14 @@ class AutoPageState extends State<AutoPage> {
           } else {
             device.hasError = true;
             device.errorMessage = reason;
+            device.resultSummary = reason;
+            if (mounted) {
+              setState(() {
+                device.isFlashing = false;
+                device.currentStep = 'Error';
+                device.flashStatus = '✗ $reason';
+              });
+            }
             registerActivity(
               device.productCode,
               device.serial,
@@ -488,13 +725,22 @@ class AutoPageState extends State<AutoPage> {
         }
       } catch (e) {
         printLog('Exception flashing ${device.port}: $e', 'rojo');
+        if (mounted) {
+          setState(() {
+            device.flashStatus = '✗ Excepción: $e';
+          });
+        }
         if (retry < settings.maxRetriesFlash - 1) {
           await Future.delayed(Duration(seconds: retry + 2));
         } else {
           device.hasError = true;
           device.errorMessage = e.toString();
+          device.resultSummary = e.toString();
           if (mounted) {
             setState(() {
+              device.isFlashing = false;
+              device.currentStep = 'Error';
+              device.flashStatus = '✗ Excepción: $e';
               _reportLines.add(
                 '${device.productCode}:${device.serial}@${device.port} ---> ERROR (Flash): $e',
               );
@@ -505,46 +751,120 @@ class AutoPageState extends State<AutoPage> {
     }
   }
 
-  /// Envía líneas de certificado con validación
+  /// Descarga un TXT con el log completo del proceso
+  Future<void> _downloadLog() async {
+    try {
+      final now = DateTime.now();
+      final ts =
+          '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}'
+          '_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}';
+      final exeDir = File(Platform.resolvedExecutable).parent.path;
+      final filePath = p.join(exeDir, 'log_$ts.txt');
+
+      final lines = <String>[];
+      lines.add('=' * 60);
+      lines.add('Log de proceso CSLAB - $now');
+      lines.add('=' * 60);
+      lines.add('');
+      lines.add('--- Resumen de dispositivos ---');
+      for (final d in _devices) {
+        lines.add('${d.port} | SN: ${d.serial} | ${d.currentStep} | ${d.resultSummary}');
+      }
+      lines.add('');
+      lines.add('--- Log detallado ---');
+      lines.addAll(_autoLog);
+
+      await File(filePath).writeAsString(lines.join('\r\n'));
+      showToast('Log guardado:\n$filePath');
+      printLog('Log descargado en: $filePath', 'verde');
+    } catch (e) {
+      showToast('Error al guardar log: $e');
+      printLog('Error descargando log: $e', 'rojo');
+    }
+  }
+
+  /// Retorna timestamp HH:MM:SS actual
+  String _nowTs() {
+    final now = DateTime.now();
+    return '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+  }
+
+  /// Agrega una línea al log detallado y hace scroll hasta el final
+  void _addAutoLog(String line) {
+    if (!mounted) return;
+    setState(() => _autoLog.add(line));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_logScrollController.hasClients) {
+        _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent);
+      }
+    });
+  }
+
+  /// Envía líneas de certificado con validación y progreso visual
+  /// Envía cada línea CON su salto de línea para que el dispositivo
+  /// pueda reconstruir el certificado correctamente
   Future<void> _sendCertificateLines(
     _DeviceInfo device,
     String certificate,
     String certType,
     String certName,
   ) async {
-    final lines =
-        certificate
-            .split('\n')
-            .where((line) => line.trim().isNotEmpty)
-            .toList();
+    // Normalizar saltos de línea a \n y dividir
+    final normalizedCert = certificate.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    final lines = normalizedCert.split('\n');
+
+    // Filtrar líneas completamente vacías
+    final nonEmptyLines = lines.where((line) => line.trim().isNotEmpty).toList();
+
+    if (mounted) {
+      setState(() {
+        device.currentStep = 'Certificados';
+        device.certCurrentName = certName;
+        device.certLinesSent = 0;
+        device.certLinesTotal = nonEmptyLines.length;
+      });
+    }
 
     printLog(
-      'Sending $certName to ${device.port}: ${lines.length} lines',
+      'Sending $certName to ${device.port}: ${nonEmptyLines.length} lines',
       'cyan',
     );
+    _addAutoLog('[${_nowTs()}] ${device.port} → Iniciando $certName (${nonEmptyLines.length} líneas)');
 
-    for (int i = 0; i < lines.length; i++) {
-      final line = lines[i].trim();
-      if (line.isEmpty) continue;
+    for (int i = 0; i < nonEmptyLines.length; i++) {
+      final line = nonEmptyLines[i];
 
-      final msg = jsonEncode({"cmd": 6, "content": "$certType#$line"});
+      // Enviar la línea CON el salto de línea al final
+      // El dispositivo necesita esto para reconstruir el certificado
+      final lineWithNewline = '$line\n';
+
+      final msg = jsonEncode({"cmd": 6, "content": "$certType#$lineWithNewline"});
       final sent = await service.sendToPort(device.port, msg);
 
       if (!sent) {
         throw Exception(
-          'Failed to send $certName line ${i + 1}/${lines.length}',
+          'Failed to send $certName line ${i + 1}/${nonEmptyLines.length}',
         );
       }
 
-      // Delay entre líneas (más largo que antes)
-      await Future.delayed(settings.certLineDelay);
-
-      // Log cada 10 líneas
-      if ((i + 1) % 10 == 0) {
-        printLog('  Progress: ${i + 1}/${lines.length} lines sent', 'verde');
+      final preview = line.length > 40 ? '${line.substring(0, 40)}...' : line;
+      if (mounted) {
+        setState(() {
+          device.certLinesSent = i + 1;
+          _autoLog.add('[${_nowTs()}] ${device.port} $certName ${i + 1}/${nonEmptyLines.length}: $preview');
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_logScrollController.hasClients) {
+            _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent);
+          }
+        });
       }
+
+      // Delay entre líneas
+      await Future.delayed(settings.certLineDelay);
     }
 
+    _addAutoLog('[${_nowTs()}] ${device.port} ✓ $certName completado (${nonEmptyLines.length} líneas)');
     printLog('$certName sent successfully to ${device.port}', 'verde');
   }
 
@@ -592,23 +912,240 @@ class AutoPageState extends State<AutoPage> {
                 text: _isRunning ? 'Procesando...' : 'Iniciar',
               ),
               const SizedBox(height: 24),
-              if (_reportLines.isNotEmpty) ...[
-                const Text('Reporte de ejecución:'),
-                const SizedBox(height: 8),
-                ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _reportLines.length,
-                  itemBuilder:
-                      (context, i) => Text(
-                        _reportLines[i],
-                        style: TextStyle(color: color1),
-                      ),
+              // Tarjetas de progreso por dispositivo
+              if (_devices.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                const Text(
+                  'Progreso:',
+                  style: TextStyle(fontWeight: FontWeight.bold, color: color0),
                 ),
-              ],
-              if (_isRunning) ...[
+                const SizedBox(height: 8),
+                ..._devices.map(
+                  (device) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color:
+                            device.hasError
+                                ? Colors.red.withValues(alpha: 0.1)
+                                : (device.currentStep == 'Completado'
+                                    ? Colors.green.withValues(alpha: 0.1)
+                                    : Colors.white.withValues(alpha: 0.5)),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color:
+                              device.hasError
+                                  ? Colors.red
+                                  : (device.currentStep == 'Completado'
+                                      ? Colors.green
+                                      : color2),
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              if (device.currentStep != 'Pendiente' &&
+                                  device.currentStep != 'Completado' &&
+                                  device.currentStep != 'Error')
+                                const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: color2,
+                                  ),
+                                )
+                              else if (device.hasError)
+                                const Icon(
+                                  Icons.error,
+                                  color: Colors.red,
+                                  size: 18,
+                                )
+                              else if (device.currentStep == 'Completado')
+                                const Icon(
+                                  Icons.check_circle,
+                                  color: Colors.green,
+                                  size: 18,
+                                )
+                              else
+                                const Icon(
+                                  Icons.pending,
+                                  color: Colors.grey,
+                                  size: 18,
+                                ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      '${device.port} - SN: ${device.serial}',
+                                      style: const TextStyle(
+                                        color: color0,
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 13,
+                                      ),
+                                    ),
+                                    Text(
+                                      device.currentStep == 'Flash'
+                                          ? 'Flash: ${device.flashStatus}'
+                                          : device.currentStep == 'Certificados'
+                                              ? '${device.certCurrentName}: ${device.certLinesSent}/${device.certLinesTotal} líneas'
+                                              : device.resultSummary.isNotEmpty
+                                                  ? device.resultSummary
+                                                  : device.currentStep,
+                                      style: TextStyle(
+                                        color: device.hasError ? Colors.red : color1,
+                                        fontSize: 11,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              // Badge del paso actual
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: device.hasError
+                                      ? Colors.red
+                                      : (device.currentStep == 'Completado'
+                                          ? Colors.green
+                                          : color2),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Text(
+                                  device.currentStep,
+                                  style: const TextStyle(
+                                    color: color4,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          // Barra de progreso de Flash
+                          if (device.flashProgress > 0) ...[
+                            const SizedBox(height: 6),
+                            Row(
+                              children: [
+                                const Text('Flash:', style: TextStyle(color: color1, fontSize: 10)),
+                                const SizedBox(width: 4),
+                                Expanded(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: LinearProgressIndicator(
+                                      value: device.flashProgress,
+                                      minHeight: 6,
+                                      backgroundColor: Colors.grey[300],
+                                      valueColor: AlwaysStoppedAnimation<Color>(
+                                        device.hasError ? Colors.red : color2,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${(device.flashProgress * 100).toInt()}%',
+                                  style: const TextStyle(color: color0, fontSize: 10),
+                                ),
+                              ],
+                            ),
+                          ],
+                          // Barra de progreso de Certificados
+                          if (device.currentStep == 'Certificados' && device.certLinesTotal > 0) ...[
+                            const SizedBox(height: 6),
+                            Row(
+                              children: [
+                                Text(
+                                  '${device.certCurrentName}:',
+                                  style: const TextStyle(color: color1, fontSize: 10),
+                                ),
+                                const SizedBox(width: 4),
+                                Expanded(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: LinearProgressIndicator(
+                                      value: device.certLinesSent / device.certLinesTotal,
+                                      minHeight: 6,
+                                      backgroundColor: Colors.grey[300],
+                                      valueColor: const AlwaysStoppedAnimation<Color>(color2),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${device.certLinesSent}/${device.certLinesTotal}',
+                                  style: const TextStyle(color: color0, fontSize: 10),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ] else if (_isRunning) ...[
                 const SizedBox(height: 24),
                 const Center(child: CircularProgressIndicator(color: color2)),
+                const SizedBox(height: 8),
+                const Center(
+                  child: Text('Preparando...', style: TextStyle(color: color1)),
+                ),
+              ],
+              // Log detallado de envíos
+              if (_autoLog.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    const Text(
+                      'Log de envíos:',
+                      style: TextStyle(fontWeight: FontWeight.bold, color: color0),
+                    ),
+                    const Spacer(),
+                    if (!_isRunning)
+                      TextButton.icon(
+                        onPressed: _downloadLog,
+                        icon: const Icon(Icons.download, size: 16, color: color2),
+                        label: const Text(
+                          'Descargar TXT',
+                          style: TextStyle(color: color2, fontSize: 12),
+                        ),
+                      ),
+                    TextButton(
+                      onPressed: () => setState(() => _autoLog.clear()),
+                      child: const Text(
+                        'Limpiar',
+                        style: TextStyle(color: color2, fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ),
+                Container(
+                  height: 220,
+                  decoration: BoxDecoration(
+                    color: color0,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: ListView.builder(
+                    controller: _logScrollController,
+                    padding: const EdgeInsets.all(8),
+                    itemCount: _autoLog.length,
+                    itemBuilder: (context, i) => Text(
+                      _autoLog[i],
+                      style: const TextStyle(
+                        color: color3,
+                        fontSize: 10,
+                        fontFamily: 'Courier',
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ],
           ),

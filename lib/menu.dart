@@ -25,11 +25,17 @@ class MenuPageState extends State<MenuPage> {
   @override
   void initState() {
     super.initState();
-    service.refreshPorts();
+    // Diferir refreshPorts para que no dispare notifyListeners durante el build
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      service.refreshPorts();
+    });
+  }
 
-    if (mounted) {
-      fToast.init(navigatorKey.currentState!.context);
-    }
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Usar el context de esta ruta (dentro de MaterialApp, tiene overlay).
+    fToast.init(context);
   }
 
   Future<void> _eraseFlash() async {
@@ -87,7 +93,7 @@ class MenuPageState extends State<MenuPage> {
                   const CircularProgressIndicator(color: color1),
                   const SizedBox(height: 16),
                   Text(
-                    'Borrando flash de ${service.selectedPortNames.length} dispositivos...\n\nEsto puede tardar hasta 1 minuto.',
+                    'Borrando flash de ${service.selectedPortNames.length} dispositivos...\n\nEsto puede tardar hasta 1 minuto por equipo.',
                     style: const TextStyle(color: color4),
                     textAlign: TextAlign.center,
                   ),
@@ -124,6 +130,7 @@ class MenuPageState extends State<MenuPage> {
         printLog('Erasing flash on $port...', 'amarillo');
 
         final args = [
+          '-u', // Unbuffered output
           '-m',
           'esptool',
           '--chip',
@@ -138,20 +145,78 @@ class MenuPageState extends State<MenuPage> {
         ];
 
         try {
-          final result = await Process.run(
+          // Usar Process.start para streaming de output
+          final process = await Process.start(
             pythonExe,
             args,
-          ).timeout(const Duration(seconds: 60));
+            runInShell: false,
+          );
 
-          printLog('Erase exitCode=${result.exitCode} for $port', 'cyan');
+          final stdoutBuffer = StringBuffer();
+          final stderrBuffer = StringBuffer();
 
-          if (result.exitCode == 0) {
+          // Escuchar stdout en tiempo real
+          final stdoutSubscription = process.stdout
+              .transform(const SystemEncoding().decoder)
+              .transform(const LineSplitter())
+              .listen((line) {
+            stdoutBuffer.writeln(line);
+            printLog('[$port] $line', 'cyan');
+            
+            // Detectar progreso de erase
+            final percentMatch = RegExp(r'\((\d+)\s*%\)').firstMatch(line);
+            if (percentMatch != null) {
+              final percent = percentMatch.group(1);
+              printLog('[$port] Erase progress: $percent%', 'verde');
+            }
+          });
+
+          // Escuchar stderr
+          final stderrSubscription = process.stderr
+              .transform(const SystemEncoding().decoder)
+              .transform(const LineSplitter())
+              .listen((line) {
+            stderrBuffer.writeln(line);
+            printLog('[$port] stderr: $line', 'rojo');
+          });
+
+          // Esperar con timeout
+          final exitCode = await process.exitCode.timeout(
+            const Duration(seconds: 90),
+            onTimeout: () {
+              process.kill();
+              return -1;
+            },
+          );
+
+          await stdoutSubscription.cancel();
+          await stderrSubscription.cancel();
+
+          printLog('Erase exitCode=$exitCode for $port', 'cyan');
+
+          if (exitCode == 0) {
             printLog('Erase successful on $port', 'verde');
             successCount++;
           } else {
-            final stderr = result.stderr?.toString().trim() ?? '';
-            final stdout = result.stdout?.toString().trim() ?? '';
-            final errorMsg = stderr.isNotEmpty ? stderr : stdout;
+            final stderrOutput = stderrBuffer.toString().trim();
+            final stdoutOutput = stdoutBuffer.toString().trim();
+            
+            // Buscar mensaje de error relevante
+            String errorMsg = 'Exit code $exitCode';
+            final allOutput = '$stdoutOutput\n$stderrOutput';
+            final allLines = allOutput.split('\n');
+            
+            for (final line in allLines) {
+              final lineLower = line.toLowerCase();
+              if (lineLower.contains('error') || 
+                  lineLower.contains('failed') ||
+                  lineLower.contains('exception') ||
+                  lineLower.contains('timeout')) {
+                errorMsg = line.trim();
+                break;
+              }
+            }
+            
             printLog('Erase FAILED on $port: $errorMsg', 'rojo');
             errorDetails.add('$port: $errorMsg');
             failCount++;
@@ -339,7 +404,9 @@ class MenuPageState extends State<MenuPage> {
                               ),
                               elevation: 5,
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 20, vertical: 12),
+                                horizontal: 20,
+                                vertical: 12,
+                              ),
                             ),
                             onPressed: () {
                               Navigator.of(context).pop();
@@ -348,11 +415,15 @@ class MenuPageState extends State<MenuPage> {
                               accessLevel = 0;
                               completeName = '';
                               // Navegar a login
-                              Navigator.of(context)
-                                  .pushReplacementNamed('/login');
+                              Navigator.of(
+                                context,
+                              ).pushReplacementNamed('/login');
                             },
-                            icon: const Icon(Icons.logout,
-                                size: 20, color: color4),
+                            icon: const Icon(
+                              Icons.logout,
+                              size: 20,
+                              color: color4,
+                            ),
                             label: const Text(
                               "Cerrar sesión",
                               style: TextStyle(color: color4, fontSize: 16),
@@ -368,8 +439,8 @@ class MenuPageState extends State<MenuPage> {
             // Indicador de estado de listening
             IconButton(
               icon: Icon(
-                service.isListening ? Icons.fiber_manual_record : Icons.pause,
-                color: service.isListening ? Colors.red : color4,
+                service.isListening ? Icons.pause : Icons.play_arrow,
+                color: color4,
                 size: 20,
               ),
               tooltip:

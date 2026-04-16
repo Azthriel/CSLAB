@@ -13,7 +13,7 @@ import 'package:path/path.dart' as p;
 //! VARIABLES !\\
 
 //!-------------------------VERSION NUMBER-------------------------!\\
-const String appVersionNumber = '2.0.0';
+const String appVersionNumber = '2.0.2';
 //!-------------------------VERSION NUMBER-------------------------!\\
 
 //*-Colores-*\\

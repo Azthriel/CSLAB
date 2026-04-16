@@ -9,6 +9,7 @@
 
 void CreateAndAttachConsole() {
   if (::AllocConsole()) {
+    ::SetConsoleTitleW(L"CS Laboratorio - Debug Console");
     FILE *unused;
     if (freopen_s(&unused, "CONOUT$", "w", stdout)) {
       _dup2(_fileno(stdout), 1);

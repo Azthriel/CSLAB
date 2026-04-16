@@ -30,11 +30,11 @@ class MyAppState extends State<MyApp> {
     super.initState();
 
     printLog('Iniciando FToast');
-
+    // Solo se instancia aquí; .init(context) se llama en cada ruta porque
+    // este context es anterior a MaterialApp y no tiene overlay todavía.
     fToast = FToast();
-    fToast.init(context);
 
-    printLog('FToast inicializado');
+    printLog('FToast instanciado');
   }
 
   @override

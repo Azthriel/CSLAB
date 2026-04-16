@@ -1,6 +1,7 @@
 import 'package:cslab/master.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -12,28 +13,54 @@ class LoginPageState extends State<LoginPage> {
   final TextEditingController legajoController = TextEditingController();
   final TextEditingController passController = TextEditingController();
   final FocusNode passNode = FocusNode();
+  
+  // Controladores para los 4 dígitos del legajo
+  final List<TextEditingController> legajoControllers = List.generate(4, (_) => TextEditingController());
+  final List<FocusNode> legajoFocusNodes = List.generate(4, (_) => FocusNode());
+  
+  // Controladores para los 4 dígitos de la contraseña
+  final List<TextEditingController> passControllers = List.generate(4, (_) => TextEditingController());
+  final List<FocusNode> passFocusNodes = List.generate(4, (_) => FocusNode());
 
   @override
-  void initState() {
-    super.initState();
-    fToast.init(navigatorKey.currentState!.context);
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Inicializar fToast con el context de esta ruta, que ya está dentro
+    // de MaterialApp y tiene el overlay disponible.
+    fToast.init(context);
   }
 
   Future<void> verificarCredenciales() async {
     printLog('Verificando credenciales...');
+    
+    // Obtener valores de los 4 cuadros
+    final legajo = legajoControllers.map((c) => c.text).join();
+    final pass = passControllers.map((c) => c.text).join();
+    
+    // Validar que legajo y contraseña tengan exactamente 4 dígitos
+    if (legajo.length != 4 || !RegExp(r'^[0-9]{4}$').hasMatch(legajo)) {
+      showToast('El legajo debe tener exactamente 4 dígitos');
+      return;
+    }
+    
+    if (pass.length != 4 || !RegExp(r'^[0-9]{4}$').hasMatch(pass)) {
+      showToast('La contraseña debe tener exactamente 4 dígitos');
+      return;
+    }
+    
     try {
       DocumentSnapshot documentSnapshot =
           await FirebaseFirestore.instance
               .collection('Legajos')
-              .doc(legajoController.text.trim())
+              .doc(legajo)
               .get();
 
       if (documentSnapshot.exists) {
         Map<String, dynamic> data =
             documentSnapshot.data() as Map<String, dynamic>;
-        if (data['pass'] == passController.text.trim()) {
+        if (data['pass'] == pass) {
           showToast('Inicio de sesión exitoso');
-          legajoConectado = legajoController.text.trim();
+          legajoConectado = legajo;
           printLog("Legajo conectado: $legajoConectado", "cyan");
           accessLevel = data['Acceso'] ?? 0;
           printLog("Nivel de acceso: $accessLevel", "cyan");
@@ -47,8 +74,9 @@ class LoginPageState extends State<LoginPage> {
       } else {
         showToast('Legajo inexistente');
       }
-    } catch (error) {
-      printLog('Error al realizar la consulta: $error');
+    } catch (error, st) {
+      printLog('Error al realizar la consulta: $error\n$st', 'rojo');
+      showToast('Error de conexión: verificá tu red e internet');
     }
   }
 
@@ -58,6 +86,104 @@ class LoginPageState extends State<LoginPage> {
     legajoController.dispose();
     passController.dispose();
     passNode.dispose();
+    // Limpiar controladores y focus nodes de los cuadros
+    for (var controller in legajoControllers) {
+      controller.dispose();
+    }
+    for (var node in legajoFocusNodes) {
+      node.dispose();
+    }
+    for (var controller in passControllers) {
+      controller.dispose();
+    }
+    for (var node in passFocusNodes) {
+      node.dispose();
+    }
+  }
+  
+  // Widget para crear los 4 cuadros de entrada
+  Widget buildPinBoxes({
+    required List<TextEditingController> controllers,
+    required List<FocusNode> focusNodes,
+    required String label,
+    required IconData icon,
+    bool obscureText = false,
+    bool isLast = false,
+  }) {
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: color4, size: 20),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: const TextStyle(color: color4, fontSize: 16, fontWeight: FontWeight.w500),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: List.generate(4, (index) {
+            return Container(
+              width: 60,
+              height: 60,
+              margin: const EdgeInsets.symmetric(horizontal: 5),
+              child: TextField(
+                controller: controllers[index],
+                focusNode: focusNodes[index],
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                obscureText: obscureText,
+                maxLength: 1,
+                style: const TextStyle(
+                  color: color4,
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(1),
+                ],
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: color2,
+                  counterText: '',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12.0),
+                    borderSide: BorderSide.none,
+                  ),
+                  contentPadding: const EdgeInsets.all(0),
+                ),
+                onChanged: (value) {
+                  if (value.isNotEmpty) {
+                    // Mover al siguiente campo
+                    if (index < 3) {
+                      focusNodes[index + 1].requestFocus();
+                    } else {
+                      // Si es el último cuadro del legajo, ir a contraseña
+                      if (!isLast) {
+                        passFocusNodes[0].requestFocus();
+                      } else {
+                        // Si es el último de contraseña, iniciar sesión
+                        verificarCredenciales();
+                      }
+                    }
+                  }
+                },
+                onSubmitted: (value) {
+                  if (index == 3 && isLast) {
+                    verificarCredenciales();
+                  }
+                },
+              ),
+            );
+          }),
+        ),
+      ],
+    );
   }
 
   //!Visual
@@ -79,54 +205,22 @@ class LoginPageState extends State<LoginPage> {
                     child: Image.asset('assets/LogoApp.png'),
                   ),
                   const SizedBox(height: 20),
-                  SizedBox(
-                    width: 300,
-                    child: TextField(
-                      style: const TextStyle(color: color4),
-                      controller: legajoController,
-                      keyboardType: TextInputType.number,
-                      decoration: InputDecoration(
-                        filled: true,
-                        fillColor: color2,
-                        labelText: 'Ingrese su legajo',
-                        labelStyle: const TextStyle(color: color4),
-                        prefixIcon: const Icon(Icons.badge, color: color4),
-                        floatingLabelBehavior: FloatingLabelBehavior.never,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(15.0),
-                          borderSide: BorderSide.none,
-                        ),
-                      ),
-                      onSubmitted: (value) {
-                        passNode.requestFocus();
-                      },
-                    ),
+                  buildPinBoxes(
+                    controllers: legajoControllers,
+                    focusNodes: legajoFocusNodes,
+                    label: 'Ingrese su legajo',
+                    icon: Icons.badge,
+                    obscureText: false,
+                    isLast: false,
                   ),
                   const SizedBox(height: 20),
-                  SizedBox(
-                    width: 300,
-                    child: TextField(
-                      style: const TextStyle(color: color4),
-                      focusNode: passNode,
-                      controller: passController,
-                      keyboardType: TextInputType.number,
-                      obscureText: true,
-                      decoration: InputDecoration(
-                        filled: true,
-                        fillColor: color2,
-                        labelText: 'Ingrese su contraseña',
-                        labelStyle: const TextStyle(color: color4),
-                        prefixIcon: const Icon(Icons.lock, color: color4),
-                        floatingLabelBehavior: FloatingLabelBehavior.never,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(15.0),
-                          borderSide: BorderSide.none,
-                        ),
-                      ),
-                      onSubmitted: (value) {
-                        verificarCredenciales();
-                      },
-                    ),
+                  buildPinBoxes(
+                    controllers: passControllers,
+                    focusNodes: passFocusNodes,
+                    label: 'Ingrese su contraseña',
+                    icon: Icons.lock,
+                    obscureText: true,
+                    isLast: true,
                   ),
                   const SizedBox(height: 20),
                   SizedBox(
