@@ -1,5 +1,5 @@
+import 'package:cslab/firestore_service.dart';
 import 'package:cslab/master.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -13,71 +13,65 @@ class LoginPageState extends State<LoginPage> {
   final TextEditingController legajoController = TextEditingController();
   final TextEditingController passController = TextEditingController();
   final FocusNode passNode = FocusNode();
-  
-  // Controladores para los 4 dígitos del legajo
-  final List<TextEditingController> legajoControllers = List.generate(4, (_) => TextEditingController());
+
+  final List<TextEditingController> legajoControllers = List.generate(
+    4,
+    (_) => TextEditingController(),
+  );
   final List<FocusNode> legajoFocusNodes = List.generate(4, (_) => FocusNode());
-  
-  // Controladores para los 4 dígitos de la contraseña
-  final List<TextEditingController> passControllers = List.generate(4, (_) => TextEditingController());
+
+  final List<TextEditingController> passControllers = List.generate(
+    4,
+    (_) => TextEditingController(),
+  );
   final List<FocusNode> passFocusNodes = List.generate(4, (_) => FocusNode());
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Inicializar fToast con el context de esta ruta, que ya está dentro
-    // de MaterialApp y tiene el overlay disponible.
     fToast.init(context);
   }
 
   Future<void> verificarCredenciales() async {
-    printLog('Verificando credenciales...');
-    
-    // Obtener valores de los 4 cuadros
+    printLog('verificarCredenciales() llamado');
+
     final legajo = legajoControllers.map((c) => c.text).join();
     final pass = passControllers.map((c) => c.text).join();
-    
-    // Validar que legajo y contraseña tengan exactamente 4 dígitos
+
     if (legajo.length != 4 || !RegExp(r'^[0-9]{4}$').hasMatch(legajo)) {
       showToast('El legajo debe tener exactamente 4 dígitos');
       return;
     }
-    
     if (pass.length != 4 || !RegExp(r'^[0-9]{4}$').hasMatch(pass)) {
       showToast('La contraseña debe tener exactamente 4 dígitos');
       return;
     }
-    
-    try {
-      DocumentSnapshot documentSnapshot =
-          await FirebaseFirestore.instance
-              .collection('Legajos')
-              .doc(legajo)
-              .get();
 
-      if (documentSnapshot.exists) {
-        Map<String, dynamic> data =
-            documentSnapshot.data() as Map<String, dynamic>;
-        if (data['pass'] == pass) {
-          showToast('Inicio de sesión exitoso');
-          legajoConectado = legajo;
-          printLog("Legajo conectado: $legajoConectado", "cyan");
-          accessLevel = data['Acceso'] ?? 0;
-          printLog("Nivel de acceso: $accessLevel", "cyan");
-          completeName = data['Nombre'] ?? '';
-          navigatorKey.currentState?.pushReplacementNamed('/menu');
-          printLog('Inicio de sesión exitoso');
-        } else {
-          showToast('Contraseña incorrecta');
-          printLog('Credenciales incorrectas');
-        }
-      } else {
+    try {
+      printLog('Llamando Firestore REST...');
+      final data = await FirestoreService.getDocument('Legajos', legajo);
+      printLog('REST OK. exists=${data != null}');
+
+      if (data == null) {
         showToast('Legajo inexistente');
+        return;
       }
-    } catch (error, st) {
-      printLog('Error al realizar la consulta: $error\n$st', 'rojo');
+
+      if (data['pass'] == pass) {
+        legajoConectado = legajo;
+        accessLevel = data['Acceso'] ?? 0;
+        completeName = data['Nombre'] ?? '';
+        showToast('Inicio de sesión exitoso');
+        navigatorKey.currentState?.pushReplacementNamed('/menu');
+      } else {
+        showToast('Contraseña incorrecta');
+      }
+    } catch (e, s) {
+      printLog('ERROR: $e\n$s', 'rojo');
       showToast('Error de conexión: verificá tu red e internet');
     }
+
+    printLog('verificarCredenciales() finalizado');
   }
 
   @override
@@ -86,22 +80,20 @@ class LoginPageState extends State<LoginPage> {
     legajoController.dispose();
     passController.dispose();
     passNode.dispose();
-    // Limpiar controladores y focus nodes de los cuadros
-    for (var controller in legajoControllers) {
-      controller.dispose();
+    for (var c in legajoControllers) {
+      c.dispose();
     }
-    for (var node in legajoFocusNodes) {
-      node.dispose();
+    for (var n in legajoFocusNodes) {
+      n.dispose();
     }
-    for (var controller in passControllers) {
-      controller.dispose();
+    for (var c in passControllers) {
+      c.dispose();
     }
-    for (var node in passFocusNodes) {
-      node.dispose();
+    for (var n in passFocusNodes) {
+      n.dispose();
     }
   }
-  
-  // Widget para crear los 4 cuadros de entrada
+
   Widget buildPinBoxes({
     required List<TextEditingController> controllers,
     required List<FocusNode> focusNodes,
@@ -119,7 +111,11 @@ class LoginPageState extends State<LoginPage> {
             const SizedBox(width: 8),
             Text(
               label,
-              style: const TextStyle(color: color4, fontSize: 16, fontWeight: FontWeight.w500),
+              style: const TextStyle(
+                color: color4,
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ],
         ),
@@ -159,24 +155,19 @@ class LoginPageState extends State<LoginPage> {
                 ),
                 onChanged: (value) {
                   if (value.isNotEmpty) {
-                    // Mover al siguiente campo
                     if (index < 3) {
                       focusNodes[index + 1].requestFocus();
                     } else {
-                      // Si es el último cuadro del legajo, ir a contraseña
                       if (!isLast) {
                         passFocusNodes[0].requestFocus();
                       } else {
-                        // Si es el último de contraseña, iniciar sesión
                         verificarCredenciales();
                       }
                     }
                   }
                 },
                 onSubmitted: (value) {
-                  if (index == 3 && isLast) {
-                    verificarCredenciales();
-                  }
+                  if (index == 3 && isLast) verificarCredenciales();
                 },
               ),
             );
@@ -186,7 +177,6 @@ class LoginPageState extends State<LoginPage> {
     );
   }
 
-  //!Visual
   @override
   Widget build(BuildContext context) {
     return Scaffold(

@@ -1,15 +1,29 @@
+import 'dart:ui';
 import 'package:cslab/login.dart';
 import 'package:cslab/menu.dart';
 import 'package:flutter/material.dart';
 import 'package:cslab/master.dart';
 import 'package:flutter/services.dart';
 import 'package:fluttertoast/fluttertoast.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'firebase_options.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initFileLogger();
   printLog('Inicio de la aplicación');
+
+  // Captura errores de Flutter
+  FlutterError.onError = (details) {
+    printLog('FlutterError: ${details.exceptionAsString()}');
+    printLog('Stack: ${details.stack}');
+  };
+
+  // Captura errores async no atrapados
+  PlatformDispatcher.instance.onError = (error, stack) {
+    printLog('PlatformDispatcher error: $error');
+    printLog('Stack: $stack');
+    return true;
+  };
+
   appVersionNumber = await _getAppVersion();
   printLog('Versión: $appVersionNumber');
 
@@ -18,9 +32,6 @@ void main() async {
 
   await ensurePythonEmbed();
   printLog('Python embebido inicializado');
-
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  printLog('Firebase inicializado');
 
   runApp(const MyApp());
 }

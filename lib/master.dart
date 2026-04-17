@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cslab/firestore_service.dart';
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
@@ -56,40 +56,39 @@ String versionToUpload = '';
 ///
 ///Si no colocas ningún color se pondra por defecto...
 void printLog(var text, [String? color]) {
-  if (color != null) {
-    switch (color.toLowerCase()) {
-      case 'rojo':
-        color = '\x1B[31m';
-        break;
-      case 'verde':
-        color = '\x1B[32m';
-        break;
-      case 'amarillo':
-        color = '\x1B[33m';
-        break;
-      case 'azul':
-        color = '\x1B[34m';
-        break;
-      case 'magenta':
-        color = '\x1B[35m';
-        break;
-      case 'cyan':
-        color = '\x1B[36m';
-        break;
-      case 'reset':
-        color = '\x1B[0m';
-        break;
-      default:
-        color = '\x1B[0m';
-        break;
-    }
-  } else {
-    color = '\x1B[0m';
-  }
+  // Escribir siempre al archivo (funciona en release)
+  logToFile(text.toString());
+
+  // Console solo en debug con colores
   if (xDebugMode) {
+    String ansi = '\x1B[0m';
+    if (color != null) {
+      switch (color.toLowerCase()) {
+        case 'rojo':
+          ansi = '\x1B[31m';
+          break;
+        case 'verde':
+          ansi = '\x1B[32m';
+          break;
+        case 'amarillo':
+          ansi = '\x1B[33m';
+          break;
+        case 'azul':
+          ansi = '\x1B[34m';
+          break;
+        case 'magenta':
+          ansi = '\x1B[35m';
+          break;
+        case 'cyan':
+          ansi = '\x1B[36m';
+          break;
+        default:
+          ansi = '\x1B[0m';
+          break;
+      }
+    }
     // ignore: avoid_print
-    print('${color}PrintData: $text\x1B[0m');
-    // Platform.isWindows ? stdout.write('${color}PrintData: $text\x1B[0m') : null;
+    print('${ansi}PrintData: $text\x1B[0m');
   } else {
     // ignore: avoid_print
     print(text);
@@ -435,44 +434,23 @@ void registerActivity(
   String accion,
 ) async {
   try {
-    FirebaseFirestore db = FirebaseFirestore.instance;
-
-    String diaDeLaFecha = DateTime.now()
+    final String diaDeLaFecha = DateTime.now()
         .toString()
         .split(' ')[0]
         .replaceAll('-', '');
 
-    String documentPath = '$productCode:$serialNumber';
+    final String documentPath = '$productCode:$serialNumber';
+    final String fieldName = '$diaDeLaFecha:$legajoConectado';
 
-    String actionListName = '$diaDeLaFecha:$legajoConectado';
+    printLog('Registrando actividad: $documentPath → $fieldName: $accion');
 
-    DocumentReference docRef = db.collection('Registro').doc(documentPath);
+    await FirestoreService.arrayUnion('Registro', documentPath, fieldName, [
+      accion,
+    ]);
 
-    DocumentSnapshot doc = await docRef.get();
-
-    if (!doc.exists) {
-      await docRef
-          .set({
-            actionListName: FieldValue.arrayUnion([accion]),
-          })
-          .then((_) {
-            printLog("Documento creado exitosamente!");
-          })
-          .catchError((error) {
-            printLog("Error creando el documento: $error");
-          });
-    } else {
-      printLog("Documento ya existe.");
-      await docRef
-          .update({
-            actionListName: FieldValue.arrayUnion([accion]),
-          })
-          .catchError(
-            (error) => printLog("Error al añadir item al array: $error"),
-          );
-    }
+    printLog('Actividad registrada correctamente.', 'verde');
   } catch (e, s) {
-    printLog('Error al registrar actividad: $e');
+    printLog('Error al registrar actividad: $e', 'rojo');
     printLog(s);
   }
 }
@@ -523,6 +501,29 @@ Future<void> ensureWindowsDeps() async {
   await doneMarker.writeAsString('ok');
   printLog('Dependencias verificadas correctamente.', 'verde');
 }
+
+// *- Logger a archivo (funciona en release) -*\\
+String get logFilePath =>
+    p.join(File(Platform.resolvedExecutable).parent.path, 'cslab_log.txt');
+
+Future<void> initFileLogger() async {
+  final file = File(logFilePath);
+  await file.writeAsString(
+    '=== CS LAB ${DateTime.now()} ===\n',
+    mode: FileMode.write,
+  );
+}
+
+void logToFile(String text) {
+  try {
+    final file = File(logFilePath);
+    file.writeAsStringSync(
+      '[${DateTime.now().toIso8601String()}] $text\n',
+      mode: FileMode.append,
+    );
+  } catch (_) {}
+}
+// *- Logger a archivo -*\\
 
 //! Clases !\\
 

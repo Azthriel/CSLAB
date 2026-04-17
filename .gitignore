@@ -47,6 +47,9 @@ firestore.indexes.json
 firestore.rules
 assets/python-embed.zip
 python-embed/
+assets/VC_redist.x64.exe
+lib/firestore_service.dart
+
 
 lib/secret.dart
 README.md
