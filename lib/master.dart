@@ -318,9 +318,10 @@ Widget buildTextField({
   void Function(String)? validator,
   int? maxLines,
   FocusNode? focusNode,
+  Alignment? alignment,
 }) {
   return FractionallySizedBox(
-    alignment: Alignment.center,
+    alignment: alignment ?? Alignment.center,
     widthFactor: widthFactor,
     child: Container(
       margin: const EdgeInsets.only(bottom: 20.0),

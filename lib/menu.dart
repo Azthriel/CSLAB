@@ -122,14 +122,14 @@ class MenuPageState extends State<MenuPage> {
       int failCount = 0;
       final List<String> errorDetails = [];
 
-      for (final port in service.selectedPortNames) {
+      // ── Erase en PARALELO ────────────────────────────────────────────────
+      Future<void> erasePort(String port) async {
         final portArg =
             (port.startsWith('COM') && port.length > 4) ? r'\\.\' + port : port;
-
         printLog('Erasing flash on $port...', 'amarillo');
 
         final args = [
-          '-u', // Unbuffered output
+          '-u',
           '-m',
           'esptool',
           '--chip',
@@ -144,42 +144,37 @@ class MenuPageState extends State<MenuPage> {
         ];
 
         try {
-          // Usar Process.start para streaming de output
           final process = await Process.start(
             pythonExe,
             args,
             runInShell: false,
           );
-
           final stdoutBuffer = StringBuffer();
           final stderrBuffer = StringBuffer();
 
-          // Escuchar stdout en tiempo real
           final stdoutSubscription = process.stdout
               .transform(const SystemEncoding().decoder)
               .transform(const LineSplitter())
               .listen((line) {
-            stdoutBuffer.writeln(line);
-            printLog('[$port] $line', 'cyan');
-            
-            // Detectar progreso de erase
-            final percentMatch = RegExp(r'\((\d+)\s*%\)').firstMatch(line);
-            if (percentMatch != null) {
-              final percent = percentMatch.group(1);
-              printLog('[$port] Erase progress: $percent%', 'verde');
-            }
-          });
+                stdoutBuffer.writeln(line);
+                printLog('[$port] $line', 'cyan');
+                final percentMatch = RegExp(r'\((\d+)\s*%\)').firstMatch(line);
+                if (percentMatch != null) {
+                  printLog(
+                    '[$port] Erase progress: ${percentMatch.group(1)}%',
+                    'verde',
+                  );
+                }
+              });
 
-          // Escuchar stderr
           final stderrSubscription = process.stderr
               .transform(const SystemEncoding().decoder)
               .transform(const LineSplitter())
               .listen((line) {
-            stderrBuffer.writeln(line);
-            printLog('[$port] stderr: $line', 'rojo');
-          });
+                stderrBuffer.writeln(line);
+                printLog('[$port] stderr: $line', 'rojo');
+              });
 
-          // Esperar con timeout
           final exitCode = await process.exitCode.timeout(
             const Duration(seconds: 90),
             onTimeout: () {
@@ -187,7 +182,6 @@ class MenuPageState extends State<MenuPage> {
               return -1;
             },
           );
-
           await stdoutSubscription.cancel();
           await stderrSubscription.cancel();
 
@@ -197,17 +191,15 @@ class MenuPageState extends State<MenuPage> {
             printLog('Erase successful on $port', 'verde');
             successCount++;
           } else {
-            final stderrOutput = stderrBuffer.toString().trim();
-            final stdoutOutput = stdoutBuffer.toString().trim();
-            
+            final allOutput =
+                '${stdoutBuffer.toString().trim()}\n${stderrBuffer.toString().trim()}';
+            final allLines = allOutput.split('\n');
+
             // Buscar mensaje de error relevante
             String errorMsg = 'Exit code $exitCode';
-            final allOutput = '$stdoutOutput\n$stderrOutput';
-            final allLines = allOutput.split('\n');
-            
             for (final line in allLines) {
               final lineLower = line.toLowerCase();
-              if (lineLower.contains('error') || 
+              if (lineLower.contains('error') ||
                   lineLower.contains('failed') ||
                   lineLower.contains('exception') ||
                   lineLower.contains('timeout')) {
@@ -215,7 +207,7 @@ class MenuPageState extends State<MenuPage> {
                 break;
               }
             }
-            
+
             printLog('Erase FAILED on $port: $errorMsg', 'rojo');
             errorDetails.add('$port: $errorMsg');
             failCount++;
@@ -225,10 +217,12 @@ class MenuPageState extends State<MenuPage> {
           errorDetails.add('$port: Exception - $e');
           failCount++;
         }
-
-        // Pequeño delay para no saturar
-        await Future.delayed(const Duration(milliseconds: 300));
       }
+
+      // Lanzar todos los erases EN PARALELO
+      await Future.wait(
+        service.selectedPortNames.map((port) => erasePort(port)),
+      );
 
       // Cerrar diálogo de progreso
       if (mounted) Navigator.pop(context);

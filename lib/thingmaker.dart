@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:cslab/firestore_service.dart';
 import 'package:cslab/secret.dart';
 import 'package:flutter/material.dart';
 import 'package:cslab/master.dart';
@@ -12,22 +13,78 @@ class ThingMaker extends StatefulWidget {
 
 class _ThingMakerState extends State<ThingMaker> {
   final service = SerialService();
-  final TextEditingController pcController = TextEditingController();
   final TextEditingController snController = TextEditingController();
   final List<String> items = [];
-  final FocusNode pcNode = FocusNode();
+
+  // ── Dropdown de producto (igual que en auto.dart / tools.dart) ────────────
+  List<String> _productCodes = [];
+  Map<String, String> _pcMap = {};
+  String? _selectedProductCode;
+  bool _isLoadingProductCodes = false;
+  bool _manualMode = false;
+  final _manualCodeController = TextEditingController();
+
+  String? get _effectiveProductCode {
+    if (_manualMode) {
+      final t = _manualCodeController.text.trim();
+      return t.isEmpty ? null : t;
+    }
+    return _selectedProductCode;
+  }
+
+  String _friendlyName(String code) {
+    final entry = _pcMap.entries.where((e) => e.value == code).firstOrNull;
+    return entry != null ? '${entry.key}  ($code)' : code;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProductCodes();
+  }
+
+  Future<void> _loadProductCodes() async {
+    if (mounted) setState(() => _isLoadingProductCodes = true);
+    try {
+      final data = await FirestoreService.getDocument('CSFABRICA', 'Data');
+      if (data == null) {
+        throw Exception('Documento CSFABRICA/Data no encontrado');
+      }
+
+      final rawProducts = data['Productos'];
+      final codes =
+          (rawProducts is List)
+              ? rawProducts.map((e) => e.toString()).toList()
+              : <String>[];
+      codes.sort();
+
+      final rawPc = data['PC'];
+      final pcMap =
+          (rawPc is Map)
+              ? rawPc.map((k, v) => MapEntry(k.toString(), v.toString()))
+              : <String, String>{};
+
+      if (mounted) {
+        setState(() {
+          _productCodes = codes;
+          _pcMap = pcMap;
+          _isLoadingProductCodes = false;
+        });
+      }
+    } catch (e) {
+      printLog('Error cargando productos en ThingMaker: $e', 'rojo');
+      if (mounted) setState(() => _isLoadingProductCodes = false);
+    }
+  }
 
   void _addItem() {
-    final pc = pcController.text.trim();
+    final pc = _effectiveProductCode ?? '';
     final sn = snController.text.trim();
     if (pc.isNotEmpty && sn.isNotEmpty && pc != '_IOT') {
       setState(() {
         items.add('$pc/$sn');
       });
-      pcController.clear();
       snController.clear();
-
-      pcNode.requestFocus();
     } else {
       showToast(
         "El código de producto y el número de serie no pueden estar vacíos",
@@ -127,26 +184,8 @@ class _ThingMakerState extends State<ThingMaker> {
         child: SingleChildScrollView(
           child: Column(
             children: [
-              Focus(
-                onFocusChange: (hasFocus) {
-                  if (!hasFocus) {
-                    final text = pcController.text;
-                    if (!text.endsWith('_IOT')) {
-                      pcController.text = '${text}_IOT';
-                      // opcional: mover el cursor al final
-                      pcController.selection = TextSelection.collapsed(
-                        offset: pcController.text.length,
-                      );
-                    }
-                  }
-                },
-                child: buildTextField(
-                  label: 'Código de producto',
-                  hint: 'Código de producto',
-                  controller: pcController,
-                  focusNode: pcNode,
-                ),
-              ),
+              // ── Selector de producto ──────────────────────────────────────
+              _buildProductSelector(),
               const SizedBox(height: 12),
               buildTextField(
                 label: 'Número de serie',
@@ -192,7 +231,6 @@ class _ThingMakerState extends State<ThingMaker> {
 
                   setState(() {
                     items.clear();
-                    pcController.clear();
                     snController.clear();
                   });
                 },
@@ -205,13 +243,164 @@ class _ThingMakerState extends State<ThingMaker> {
         onPressed: () {
           setState(() {
             items.clear();
-            pcController.clear();
             snController.clear();
           });
           showToast("Lista borrada");
         },
         backgroundColor: color2,
         child: const Icon(Icons.delete, color: color4),
+      ),
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Selector de producto (igual que en tools/auto)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  Widget _buildProductSelector() {
+    if (_manualMode) {
+      return Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _manualCodeController,
+              style: const TextStyle(color: color4),
+              decoration: InputDecoration(
+                labelText: 'Código de producto',
+                labelStyle: const TextStyle(color: color3),
+                filled: true,
+                fillColor: color1,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: BorderSide.none,
+                ),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 14,
+                ),
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+          ),
+          const SizedBox(width: 8),
+          _circleBtn(
+            icon: Icons.list,
+            tooltip: 'Usar dropdown',
+            onPressed:
+                () => setState(() {
+                  _manualMode = false;
+                  _manualCodeController.clear();
+                }),
+          ),
+        ],
+      );
+    }
+
+    return Row(
+      children: [
+        Expanded(
+          child:
+              _isLoadingProductCodes
+                  ? _loadingField('Cargando productos...')
+                  : DropdownButtonFormField<String>(
+                    initialValue:
+                        (_selectedProductCode != null &&
+                                _productCodes.contains(_selectedProductCode))
+                            ? _selectedProductCode
+                            : null,
+                    isExpanded: true,
+                    dropdownColor: color1,
+                    style: const TextStyle(color: color4, fontSize: 14),
+                    decoration: InputDecoration(
+                      filled: true,
+                      fillColor: color1,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 14,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
+                    hint: Text(
+                      _productCodes.isEmpty
+                          ? 'Sin productos en Firestore'
+                          : 'Código de producto',
+                      style: const TextStyle(color: color3, fontSize: 13),
+                    ),
+                    items:
+                        _productCodes
+                            .map(
+                              (code) => DropdownMenuItem(
+                                value: code,
+                                child: Text(
+                                  _friendlyName(code),
+                                  style: const TextStyle(color: color4),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            )
+                            .toList(),
+                    onChanged: (v) => setState(() => _selectedProductCode = v),
+                  ),
+        ),
+        const SizedBox(width: 8),
+        _circleBtn(
+          icon: Icons.refresh,
+          tooltip: 'Recargar productos',
+          onPressed: _loadProductCodes,
+        ),
+        const SizedBox(width: 4),
+        _circleBtn(
+          icon: Icons.edit,
+          tooltip: 'Ingresar código manual',
+          onPressed: () => setState(() => _manualMode = true),
+        ),
+      ],
+    );
+  }
+
+  Widget _circleBtn({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onPressed,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: color2,
+        borderRadius: BorderRadius.circular(24),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(24),
+          onTap: onPressed,
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Icon(icon, size: 20, color: color4),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _loadingField(String label) {
+    return Container(
+      height: 52,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: color1,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2, color: color2),
+          ),
+          const SizedBox(width: 10),
+          Text(label, style: const TextStyle(color: color3, fontSize: 14)),
+        ],
       ),
     );
   }
