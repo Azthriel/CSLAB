@@ -13,6 +13,7 @@ import 'package:flutter/services.dart'
         LengthLimitingTextInputFormatter;
 import 'package:cslab/master.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -182,6 +183,11 @@ class AutoPageState extends State<AutoPage> {
   // Proceso principal
   // ──────────────────────────────────────────────────────────────────────────
 
+  /// Cliente HTTP que acepta certificados SSL no verificables (antivirus/proxy).
+  http.Client _makeClient() => IOClient(
+    HttpClient()..badCertificateCallback = (cert, host, port) => true,
+  );
+
   Future<void> _runAll() async {
     final productCode = _effectiveProductCode;
     if (productCode == null ||
@@ -225,19 +231,21 @@ class AutoPageState extends State<AutoPage> {
       // Descargar firmware
       final tempDir = await getTemporaryDirectory();
       final Map<String, String> localPaths = {};
+      final dlClient = _makeClient();
       for (final file in ['bootloader.bin', 'partitions.bin', 'firmware.bin']) {
         final url = Uri.parse(
           '$_baseRawUrl/$_owner/$_repo/$_branch/$productCode/LAB_FILES/$folderName/$file',
         );
         final outPath = p.join(tempDir.path, file);
         printLog('Downloading $file', 'cyan');
-        final response = await http.get(url);
+        final response = await dlClient.get(url);
         if (response.statusCode != 200) {
           throw Exception('Error descargando $file: ${response.statusCode}');
         }
         await File(outPath).writeAsBytes(response.bodyBytes);
         localPaths[file] = outPath;
       }
+      dlClient.close();
       // boot_app0.bin desde assets
       {
         final data = await rootBundle.load('assets/boot_app0.bin');
